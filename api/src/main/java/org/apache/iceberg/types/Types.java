@@ -419,8 +419,8 @@ public class Types {
       return new NestedField(true, id, name, type, doc, null, null);
     }
 
-    public static NestedField optional(int id, String name, Type type, String doc,
-                                       Object initialDefault, Object writeDefault) {
+    public static NestedField optional(
+        int id, String name, Type type, String doc, Object initialDefault, Object writeDefault) {
       return new NestedField(true, id, name, type, doc, initialDefault, writeDefault);
     }
 
@@ -432,8 +432,8 @@ public class Types {
       return new NestedField(false, id, name, type, doc, null, null);
     }
 
-    public static NestedField required(int id, String name, Type type, String doc,
-                                       Object initialDefault, Object writeDefault) {
+    public static NestedField required(
+        int id, String name, Type type, String doc, Object initialDefault, Object writeDefault) {
       return new NestedField(false, id, name, type, doc, initialDefault, writeDefault);
     }
 
@@ -445,8 +445,14 @@ public class Types {
       return new NestedField(isOptional, id, name, type, doc, null, null);
     }
 
-    public static NestedField of(int id, boolean isOptional, String name, Type type, String doc,
-                                 Object initialDefault, Object writeDefault) {
+    public static NestedField of(
+        int id,
+        boolean isOptional,
+        String name,
+        Type type,
+        String doc,
+        Object initialDefault,
+        Object writeDefault) {
       return new NestedField(isOptional, id, name, type, doc, initialDefault, writeDefault);
     }
 
@@ -459,8 +465,13 @@ public class Types {
     private final Object writeDefault;
 
     private NestedField(
-        boolean isOptional, int id, String name, Type type, String doc,
-        Object initialDefault, Object writeDefault) {
+        boolean isOptional,
+        int id,
+        String name,
+        Type type,
+        String doc,
+        Object initialDefault,
+        Object writeDefault) {
       Preconditions.checkNotNull(name, "Name cannot be null");
       Preconditions.checkNotNull(type, "Type cannot be null");
       this.isOptional = isOptional;
