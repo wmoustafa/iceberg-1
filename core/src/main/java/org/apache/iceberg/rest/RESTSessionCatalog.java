@@ -1102,6 +1102,7 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
     private String defaultCatalog = null;
     private Schema schema = null;
     private String location = null;
+    private TableIdentifier storageTableIdentifier = null;
 
     private RESTViewBuilder(SessionContext context, TableIdentifier identifier) {
       checkViewIdentifierIsValid(identifier);
@@ -1153,6 +1154,12 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
     }
 
     @Override
+    public ViewBuilder withStorageTableIdentifier(TableIdentifier newStorageTableIdentifier) {
+      this.storageTableIdentifier = newStorageTableIdentifier;
+      return this;
+    }
+
+    @Override
     public View create() {
       Preconditions.checkState(
           !representations.isEmpty(), "Cannot create view without specifying a query");
@@ -1160,7 +1167,7 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
       Preconditions.checkState(
           null != defaultNamespace, "Cannot create view without specifying a default namespace");
 
-      ViewVersion viewVersion =
+      ImmutableViewVersion.Builder versionBuilder =
           ImmutableViewVersion.builder()
               .versionId(1)
               .schemaId(schema.schemaId())
@@ -1168,8 +1175,13 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
               .defaultNamespace(defaultNamespace)
               .defaultCatalog(defaultCatalog)
               .timestampMillis(System.currentTimeMillis())
-              .putAllSummary(EnvironmentContext.get())
-              .build();
+              .putAllSummary(EnvironmentContext.get());
+
+      if (storageTableIdentifier != null) {
+        versionBuilder.storageTable(storageTableIdentifier);
+      }
+
+      ViewVersion viewVersion = versionBuilder.build();
 
       CreateViewRequest request =
           ImmutableCreateViewRequest.builder()
@@ -1237,7 +1249,7 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
               .max(Integer::compareTo)
               .orElseGet(metadata::currentVersionId);
 
-      ViewVersion viewVersion =
+      ImmutableViewVersion.Builder versionBuilder =
           ImmutableViewVersion.builder()
               .versionId(maxVersionId + 1)
               .schemaId(schema.schemaId())
@@ -1245,8 +1257,13 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
               .defaultNamespace(defaultNamespace)
               .defaultCatalog(defaultCatalog)
               .timestampMillis(System.currentTimeMillis())
-              .putAllSummary(EnvironmentContext.get())
-              .build();
+              .putAllSummary(EnvironmentContext.get());
+
+      if (storageTableIdentifier != null) {
+        versionBuilder.storageTable(storageTableIdentifier);
+      }
+
+      ViewVersion viewVersion = versionBuilder.build();
 
       ViewMetadata.Builder builder =
           ViewMetadata.buildFrom(metadata)
