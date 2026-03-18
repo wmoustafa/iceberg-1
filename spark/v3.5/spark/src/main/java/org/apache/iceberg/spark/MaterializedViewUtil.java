@@ -36,14 +36,7 @@ public class MaterializedViewUtil {
 
   private MaterializedViewUtil() {}
 
-  public static final String MATERIALIZED_VIEW_PROPERTY_KEY = "iceberg.materialized.view";
-  public static final String MATERIALIZED_VIEW_STORAGE_TABLE_PROPERTY_KEY =
-      "iceberg.materialized.view.storage.table";
-  public static final String MATERIALIZED_VIEW_BASE_SNAPSHOT_PROPERTY_KEY_PREFIX =
-      "iceberg.base.snapshot.";
-  public static final String MATERIALIZED_VIEW_VERSION_PROPERTY_KEY =
-      "iceberg.materialized.view.version";
-  private static final String MATERIALIZED_VIEW_STORAGE_TABLE_IDENTIFIER_SUFFIX = ".storage.table";
+  private static final String MATERIALIZED_VIEW_STORAGE_TABLE_IDENTIFIER_SUFFIX = "__storage";
 
   public static List<Table> extractBaseTables(String query) {
     return extractBaseTableIdentifiers(query).stream()

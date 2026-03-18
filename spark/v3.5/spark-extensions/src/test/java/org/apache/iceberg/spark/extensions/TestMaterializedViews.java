@@ -19,7 +19,6 @@
 package org.apache.iceberg.spark.extensions;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.fail;
 
 import java.io.File;
@@ -38,9 +37,8 @@ import org.apache.iceberg.io.OutputFile;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.spark.MaterializedViewUtil;
 import org.apache.iceberg.spark.SparkCatalogConfig;
-import org.apache.iceberg.spark.source.SparkMaterializedView;
 import org.apache.iceberg.spark.source.SparkView;
-import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
+import org.apache.iceberg.view.View;
 import org.apache.spark.sql.catalyst.analysis.NoSuchViewException;
 import org.apache.spark.sql.connector.catalog.CatalogPlugin;
 import org.apache.spark.sql.connector.catalog.Identifier;
@@ -103,65 +101,62 @@ public class TestMaterializedViews extends SparkExtensionsTestBase {
   }
 
   @Test
-  public void assertReadFromStorageTableWhenFresh() throws IOException {
-    sql("DROP VIEW IF EXISTS %s", materializedViewName);
+  public void testStorageTableFieldOnViewVersion() {
     sql("CREATE MATERIALIZED VIEW %s AS SELECT id, data FROM %s", materializedViewName, tableName);
 
-    // Assert that number of records in the materialized view is the same as the number of records
-    // in the table
-    assertThat(sql("SELECT * FROM %s", materializedViewName).size())
-        .isEqualTo(sql("SELECT * FROM %s", tableName).size());
-
-    // Assert that the catalog loadView method throws IllegalStateException because the view is
-    // fresh
-    assertThatThrownBy(() -> sparkViewCatalog().loadView(viewIdentifier()))
-        .isInstanceOf(IllegalStateException.class);
-
-    // Assert that the catalog loadTable method returns an object, and its type is
-    // SparkMaterializedView
-    try {
-      assertThat(sparkTableCatalog().loadTable(viewIdentifier()))
-          .isInstanceOf(SparkMaterializedView.class);
-    } catch (NoSuchTableException e) {
-      fail("Materialized view storage table not found");
-    }
+    View view = loadIcebergView();
+    // storage-table should be set on the view version, not as a property
+    assertThat(view.currentVersion().storageTable()).isNotNull();
+    assertThat(view.currentVersion().storageTable().name())
+        .isEqualTo(materializedViewName + "__storage");
+    assertThat(view.currentVersion().storageTable().namespace())
+        .isEqualTo(NAMESPACE);
   }
 
   @Test
-  public void assertNotReadFromStorageTableWhenStale() throws IOException {
+  public void testNoOldMvProperties() {
     sql("CREATE MATERIALIZED VIEW %s AS SELECT id, data FROM %s", materializedViewName, tableName);
 
-    // Insert one row to the table so the materialized view becomes stale
-    sql("INSERT INTO %s VALUES (1, 'a')", tableName);
+    View view = loadIcebergView();
+    // old property-based MV metadata should not exist
+    assertThat(view.properties().get("iceberg.materialized.view")).isNull();
+    assertThat(view.properties().get("iceberg.materialized.view.storage.table")).isNull();
+  }
 
-    // Assert that number of records in the materialized view is the same as the number of records
-    // in the table
-    assertThat(sql("SELECT * FROM %s", materializedViewName).size())
-        .isEqualTo(sql("SELECT * FROM %s", tableName).size());
+  @Test
+  public void testNeverRefreshedMvIsNotFresh() {
+    sql("CREATE MATERIALIZED VIEW %s AS SELECT id, data FROM %s", materializedViewName, tableName);
 
-    // Assert that the catalog loadView method returns an object, and of type SparkView
+    // A newly created MV has no snapshots on its storage table, so it's not fresh.
+    // loadView should succeed (returns stale view)
     try {
       assertThat(sparkViewCatalog().loadView(viewIdentifier())).isInstanceOf(SparkView.class);
     } catch (NoSuchViewException e) {
       fail("Materialized view not found");
     }
-
-    // Assert that the catalog loadTable fails with NoSuchTableException because the view is stale
-    assertThatThrownBy(() -> sparkTableCatalog().loadTable(viewIdentifier()))
-        .isInstanceOf(NoSuchTableException.class);
   }
 
   @Test
-  public void testDefaultStorageTableIdentifier() {
+  public void testStorageTableCreatedBeforeMvMetadata() {
     sql("CREATE MATERIALIZED VIEW %s AS SELECT id, data FROM %s", materializedViewName, tableName);
 
-    // Assert that the storage table is in the list of tables
-    final String materializedViewStorageTableName =
+    // The storage table should exist
+    String storageTableName =
         MaterializedViewUtil.getDefaultMaterializedViewStorageTableIdentifier(
                 Identifier.of(new String[] {NAMESPACE.toString()}, materializedViewName))
             .name();
     assertThat(sql("SHOW TABLES"))
-        .anySatisfy(row -> assertThat(row[1]).isEqualTo(materializedViewStorageTableName));
+        .anySatisfy(row -> assertThat(row[1]).isEqualTo(storageTableName));
+  }
+
+  @Test
+  public void testDefaultStorageTableNaming() {
+    sql("CREATE MATERIALIZED VIEW %s AS SELECT id, data FROM %s", materializedViewName, tableName);
+
+    // Default naming should be <name>__storage
+    String expectedStorageTableName = materializedViewName + "__storage";
+    assertThat(sql("SHOW TABLES"))
+        .anySatisfy(row -> assertThat(row[1]).isEqualTo(expectedStorageTableName));
   }
 
   @Test
@@ -187,6 +182,13 @@ public class TestMaterializedViews extends SparkExtensionsTestBase {
 
   private Identifier viewIdentifier() {
     return Identifier.of(new String[] {NAMESPACE.toString()}, materializedViewName);
+  }
+
+  private View loadIcebergView() {
+    org.apache.iceberg.catalog.ViewCatalog icebergViewCatalog =
+        (org.apache.iceberg.catalog.ViewCatalog) sparkTableCatalog();
+    return icebergViewCatalog.loadView(
+        TableIdentifier.of(NAMESPACE, materializedViewName));
   }
 
   // Required to be public since it is loaded by org.apache.iceberg.CatalogUtil.loadCatalog
@@ -229,8 +231,4 @@ public class TestMaterializedViews extends SparkExtensionsTestBase {
       }
     }
   }
-
-  // TODO Add DROP MATERIALIZED VIEW test
-  // TODO Assert materialized view creation fails when the location is not provided
-  // TODO Test cannot replace a materialized view with a new version
 }

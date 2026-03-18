@@ -162,7 +162,7 @@ public abstract class BaseMetastoreViewCatalog extends BaseMetastoreCatalog impl
       Preconditions.checkState(
           null != defaultNamespace, "Cannot create view without specifying a default namespace");
 
-      ViewVersion viewVersion =
+      ImmutableViewVersion.Builder versionBuilder =
           ImmutableViewVersion.builder()
               .versionId(1)
               .schemaId(schema.schemaId())
@@ -170,8 +170,13 @@ public abstract class BaseMetastoreViewCatalog extends BaseMetastoreCatalog impl
               .defaultNamespace(defaultNamespace)
               .defaultCatalog(defaultCatalog)
               .timestampMillis(System.currentTimeMillis())
-              .putAllSummary(EnvironmentContext.get())
-              .build();
+              .putAllSummary(EnvironmentContext.get());
+
+      if (storageTableIdentifier != null) {
+        versionBuilder.storageTable(storageTableIdentifier);
+      }
+
+      ViewVersion viewVersion = versionBuilder.build();
 
       ViewMetadata viewMetadata =
           ViewMetadata.builder()
@@ -211,7 +216,7 @@ public abstract class BaseMetastoreViewCatalog extends BaseMetastoreCatalog impl
               .max(Integer::compareTo)
               .orElseGet(metadata::currentVersionId);
 
-      ViewVersion viewVersion =
+      ImmutableViewVersion.Builder versionBuilder =
           ImmutableViewVersion.builder()
               .versionId(maxVersionId + 1)
               .schemaId(schema.schemaId())
@@ -219,8 +224,13 @@ public abstract class BaseMetastoreViewCatalog extends BaseMetastoreCatalog impl
               .defaultNamespace(defaultNamespace)
               .defaultCatalog(defaultCatalog)
               .timestampMillis(System.currentTimeMillis())
-              .putAllSummary(EnvironmentContext.get())
-              .build();
+              .putAllSummary(EnvironmentContext.get());
+
+      if (storageTableIdentifier != null) {
+        versionBuilder.storageTable(storageTableIdentifier);
+      }
+
+      ViewVersion viewVersion = versionBuilder.build();
 
       ViewMetadata.Builder builder =
           ViewMetadata.buildFrom(metadata)

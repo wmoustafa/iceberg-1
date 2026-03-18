@@ -88,7 +88,7 @@ public class BaseView implements View, Serializable {
 
   @Override
   public TableIdentifier storageTableIdentifier() {
-    return operations().current().storageTableIdentifier();
+    return currentVersion().storageTable();
   }
 
   @Override
