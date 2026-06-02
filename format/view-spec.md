@@ -204,7 +204,7 @@ A change to the materialized view's definition produces a new `view-version-id`;
 
 #### Refresh state
 
-The refresh state record captures the dependencies in the materialized view's dependency graph. The list of dependencies is determined by the producer of the materialized view. See [Appendix B](#appendix-b-example-strategies-for-selecting-dependencies) for example strategies of choosing the dependency list. Each dependency is recorded in `source-states` as either a `table` entry (a base table or an upstream materialized view's storage table) or a `view` entry.
+The refresh state record captures the dependencies in the materialized view's dependency graph. The list of dependencies is determined by the producer of the materialized view. See [Appendix B](#appendix-b-example-strategies-for-selecting-dependencies) for example strategies of choosing the dependency list. Each dependency is recorded in `source-states` as either a `table` entry or a `view` entry.
 
 The refresh state has the following fields:
 
@@ -220,14 +220,12 @@ Source state records capture the state of objects referenced by a materialized v
 
 | Type    | Description |
 |---------|-------------|
-| `table` | An Iceberg table — either a base table in the dependency graph, or the storage table of an upstream materialized view |
+| `table` | An Iceberg table in the dependency graph |
 | `view`  | An Iceberg view in the dependency graph |
-
-An upstream materialized view may be recorded as a `table` entry referencing its storage table, a `view` entry referencing its view metadata, or both. When recorded as a `table` entry, its own dependencies are reached recursively through its `refresh-state`.
 
 #### Source table state
 
-A source table record captures the state of a source table (including a source materialized view's storage table) at the time of the last refresh operation.
+A source table record captures the state of a source table at the time of the last refresh operation.
 
 | Requirement | Field name    | Description |
 |-------------|---------------|-------------|
@@ -270,7 +268,7 @@ A snapshot whose refresh state violates a `Must` rule is invalid; consumers may 
 Consumers may use any combination of the following to assess the freshness of the storage table:
 
 - **Recency policy.** Accept the storage table when `refresh-start-timestamp-ms` falls within a staleness window. A recency policy bounds data age but does not establish freshness.
-- **Trust the recorded `source-states`.** Compare each entry against the current catalog state — `snapshot-id` for tables, `version-id` for views, optionally recursive verification for upstream materialized views recorded by their storage tables. Also confirm that the recorded `view-version-id` equals the materialized view's current `view-version-id`.
+- **Trust the recorded `source-states`.** Compare each entry against the current catalog state — `snapshot-id` for tables, `version-id` for views. Also confirm that the recorded `view-version-id` equals the materialized view's current `view-version-id`.
 - **Verify by parsing the view query.** Derive the dependency set from the SQL and confirm every dependency is covered by `source-states` and matches the current state. Treat any uncovered dependency as undetermined.
 
 If a consumer's assessment passes, it reads from the storage table. If not, the consumer may fail the query, evaluate the view query directly, or apply another strategy.
