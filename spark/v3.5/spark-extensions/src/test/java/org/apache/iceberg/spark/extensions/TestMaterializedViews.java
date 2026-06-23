@@ -42,7 +42,6 @@ import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.spark.MaterializedViewUtil;
 import org.apache.iceberg.spark.SparkCatalog;
 import org.apache.iceberg.spark.SparkCatalogConfig;
-import org.apache.iceberg.spark.source.SparkMaterializedView;
 import org.apache.iceberg.spark.source.SparkView;
 import org.apache.iceberg.view.RefreshState;
 import org.apache.iceberg.view.RefreshStateParser;
@@ -150,18 +149,27 @@ public class TestMaterializedViews extends ExtensionsTestBase {
 
     simulateRefresh();
 
-    // Fresh MV: loadTable should return SparkMaterializedView
-    try {
-      assertThat(sparkTableCatalog().loadTable(viewIdentifier()))
-          .isInstanceOf(SparkMaterializedView.class);
-    } catch (NoSuchTableException e) {
-      fail("Fresh materialized view should be loadable as a table");
-    }
+    // Fresh MV: the analyzer rule rewrites the relation to the storage table identifier so the
+    // analyzed plan references the storage table by name.
+    View view = loadIcebergView();
+    String storageTableName = view.currentVersion().storageTable().name();
+    String analyzedPlan =
+        spark
+            .sql(String.format("SELECT * FROM %s", materializedViewName))
+            .queryExecution()
+            .analyzed()
+            .toString();
+    assertThat(analyzedPlan).contains(storageTableName);
 
-    // Fresh MV: loadView should throw since the engine should use loadTable instead
-    assertThatThrownBy(() -> sparkViewCatalog().loadView(viewIdentifier()))
-        .isInstanceOf(IllegalStateException.class)
-        .hasMessageContaining("fresh");
+    // The MV SELECT returns the 2 rows that simulateRefresh wrote to the storage table.
+    assertThat(sql("SELECT * FROM %s ORDER BY id", materializedViewName)).hasSize(2);
+
+    // loadView always returns a SparkView regardless of freshness; routing is the analyzer's job.
+    try {
+      assertThat(sparkViewCatalog().loadView(viewIdentifier())).isInstanceOf(SparkView.class);
+    } catch (NoSuchViewException e) {
+      fail("Materialized view not found");
+    }
   }
 
   @TestTemplate
@@ -181,7 +189,11 @@ public class TestMaterializedViews extends ExtensionsTestBase {
       fail("Stale materialized view should be loadable as a view");
     }
 
-    // Stale MV: loadTable should not resolve to the MV's storage table
+    // Stale MV: the analyzer rule leaves the UnresolvedRelation alone and ResolveViews expands the
+    // view query, so SELECT reflects the live base table — all 3 rows.
+    assertThat(sql("SELECT * FROM %s ORDER BY id", materializedViewName)).hasSize(3);
+
+    // Stale MV: loadTable still throws because the MV identifier is not a table.
     assertThatThrownBy(() -> sparkTableCatalog().loadTable(viewIdentifier()))
         .isInstanceOf(NoSuchTableException.class)
         .hasMessageContaining(materializedViewName);
@@ -229,20 +241,21 @@ public class TestMaterializedViews extends ExtensionsTestBase {
     // Refresh the materialized view
     sql("REFRESH MATERIALIZED VIEW %s", materializedViewName);
 
-    // After refresh, the MV should be fresh and loadable as a table
-    try {
-      assertThat(sparkTableCatalog().loadTable(viewIdentifier()))
-          .isInstanceOf(SparkMaterializedView.class);
-    } catch (NoSuchTableException e) {
-      fail("Refreshed materialized view should be loadable as a table");
-    }
-
-    // Verify the storage table has data
+    // After refresh, the analyzer routes SELECT FROM the MV to the storage table.
     View view = loadIcebergView();
-    String storageTableRef =
-        String.format(
-            "%s.%s.%s", catalogName, NAMESPACE, view.currentVersion().storageTable().name());
-    assertThat(sql("SELECT * FROM %s", storageTableRef)).hasSize(2);
+    String storageTableName = view.currentVersion().storageTable().name();
+    String analyzedPlan =
+        spark
+            .sql(String.format("SELECT * FROM %s", materializedViewName))
+            .queryExecution()
+            .analyzed()
+            .toString();
+    assertThat(analyzedPlan).contains(storageTableName);
+
+    // SELECT returns the 2 materialized rows, matching the storage table contents.
+    assertThat(sql("SELECT * FROM %s ORDER BY id", materializedViewName)).hasSize(2);
+    String storageTableRef = String.format("%s.%s.%s", catalogName, NAMESPACE, storageTableName);
+    assertThat(sql("SELECT * FROM %s ORDER BY id", storageTableRef)).hasSize(2);
   }
 
   @TestTemplate
@@ -256,30 +269,34 @@ public class TestMaterializedViews extends ExtensionsTestBase {
     // Insert more data
     sql("INSERT INTO %s VALUES (3, 'c')", tableName);
 
-    // Before second refresh, the MV should be stale
-    try {
-      assertThat(sparkViewCatalog().loadView(viewIdentifier())).isInstanceOf(SparkView.class);
-    } catch (NoSuchViewException e) {
-      fail("Stale materialized view should be loadable as a view");
-    }
+    // Stale MV: the analyzer rule does not reroute; ResolveViews expands the view query.
+    // The analyzed plan references the base table, not the storage table.
+    View view = loadIcebergView();
+    String storageTableName = view.currentVersion().storageTable().name();
+    String stalePlan =
+        spark
+            .sql(String.format("SELECT * FROM %s", materializedViewName))
+            .queryExecution()
+            .analyzed()
+            .toString();
+    assertThat(stalePlan).doesNotContain(storageTableName);
+    assertThat(sql("SELECT * FROM %s ORDER BY id", materializedViewName)).hasSize(3);
 
     // Second refresh
     sql("REFRESH MATERIALIZED VIEW %s", materializedViewName);
 
-    // After refresh, the MV should be fresh again
-    try {
-      assertThat(sparkTableCatalog().loadTable(viewIdentifier()))
-          .isInstanceOf(SparkMaterializedView.class);
-    } catch (NoSuchTableException e) {
-      fail("Refreshed materialized view should be loadable as a table");
-    }
+    // Fresh again: the analyzer routes to the storage table; SELECT returns all 3 rows.
+    String freshPlan =
+        spark
+            .sql(String.format("SELECT * FROM %s", materializedViewName))
+            .queryExecution()
+            .analyzed()
+            .toString();
+    assertThat(freshPlan).contains(storageTableName);
+    assertThat(sql("SELECT * FROM %s ORDER BY id", materializedViewName)).hasSize(3);
 
-    // Verify the storage table has all 3 rows
-    View view = loadIcebergView();
-    String storageTableRef =
-        String.format(
-            "%s.%s.%s", catalogName, NAMESPACE, view.currentVersion().storageTable().name());
-    assertThat(sql("SELECT * FROM %s", storageTableRef)).hasSize(3);
+    String storageTableRef = String.format("%s.%s.%s", catalogName, NAMESPACE, storageTableName);
+    assertThat(sql("SELECT * FROM %s ORDER BY id", storageTableRef)).hasSize(3);
   }
 
   private void simulateRefresh() {
