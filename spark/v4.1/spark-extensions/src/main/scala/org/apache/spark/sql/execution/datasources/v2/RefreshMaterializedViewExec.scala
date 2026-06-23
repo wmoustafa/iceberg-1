@@ -31,6 +31,7 @@ import org.apache.spark.sql.catalyst.analysis.NoSuchTableException
 import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.connector.catalog.Identifier
 import org.apache.spark.sql.connector.catalog.ViewCatalog
+import org.apache.spark.sql.functions
 import scala.jdk.CollectionConverters._
 
 case class RefreshMaterializedViewExec(catalog: ViewCatalog, ident: Identifier)
@@ -87,7 +88,7 @@ case class RefreshMaterializedViewExec(catalog: ViewCatalog, ident: Identifier)
       queryResult
         .writeTo(storageTableRef)
         .option("snapshot-property." + RefreshState.REFRESH_STATE_SUMMARY_KEY, refreshStateJson)
-        .overwritePartitions()
+        .overwrite(functions.lit(true))
     } catch {
       case e: NoSuchTableException =>
         throw new IllegalStateException(
