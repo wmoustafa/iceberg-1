@@ -21,6 +21,7 @@ package org.apache.iceberg.spark.extensions
 import org.apache.spark.sql.SparkSessionExtensions
 import org.apache.spark.sql.catalyst.analysis.CheckViews
 import org.apache.spark.sql.catalyst.analysis.ProcedureArgumentCoercion
+import org.apache.spark.sql.catalyst.analysis.ResolveMaterializedViews
 import org.apache.spark.sql.catalyst.analysis.ResolveProcedures
 import org.apache.spark.sql.catalyst.analysis.ResolveViews
 import org.apache.spark.sql.catalyst.analysis.RewriteMergeIntoTableForRowLineage
@@ -38,6 +39,7 @@ class IcebergSparkSessionExtensions extends (SparkSessionExtensions => Unit) {
 
     // analyzer extensions
     extensions.injectResolutionRule { spark => ResolveProcedures(spark) }
+    extensions.injectResolutionRule { spark => ResolveMaterializedViews(spark) }
     extensions.injectResolutionRule { spark => ResolveViews(spark) }
     extensions.injectResolutionRule { _ => ProcedureArgumentCoercion }
     extensions.injectCheckRule(_ => CheckViews)
