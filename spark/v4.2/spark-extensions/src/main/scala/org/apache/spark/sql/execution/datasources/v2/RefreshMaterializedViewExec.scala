@@ -31,19 +31,13 @@ import org.apache.iceberg.view.SQLViewRepresentation
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.NoSuchTableException
 import org.apache.spark.sql.catalyst.expressions.Attribute
-import org.apache.spark.sql.catalyst.plans.logical.SubqueryAlias
-import org.apache.spark.sql.connector.catalog.CatalogManager
 import org.apache.spark.sql.connector.catalog.Identifier
-import org.apache.spark.sql.connector.catalog.LookupCatalog
 import org.apache.spark.sql.connector.catalog.ViewCatalog
 import org.apache.spark.sql.functions
 import scala.jdk.CollectionConverters._
 
 case class RefreshMaterializedViewExec(catalog: ViewCatalog, ident: Identifier)
-    extends LeafV2CommandExec
-    with LookupCatalog {
-
-  protected lazy val catalogManager: CatalogManager = session.sessionState.catalogManager
+    extends LeafV2CommandExec {
 
   override def output: Seq[Attribute] = Nil
 
@@ -164,32 +158,31 @@ case class RefreshMaterializedViewExec(catalog: ViewCatalog, ident: Identifier)
       case _ => // skip non-iceberg leaves
     }
 
-    // Spark's analyzer resolves every view reference into a SubqueryAlias wrapping the
-    // view's expanded query, including transitively for view-of-view chains, so a single
-    // pass over the whole plan (not just its leaves) discovers every source view at every
-    // nesting depth.
+    // Spark's analyzer replaces every view reference with a View node wrapping the view's
+    // expanded query, including transitively for view-of-view chains, so a single pass over
+    // the whole plan (not just its leaves) discovers every source view at every nesting depth.
+    // Matching View nodes rather than the SubqueryAlias that wraps them keeps tables out of
+    // this pass, since Spark aliases table references the same way.
     plan
-      .collect { case sub: SubqueryAlias =>
-        sub.identifier.qualifier :+ sub.identifier.name
-      }
-      .collect {
-        case CatalogAndIdentifier(cat, viewIdent) if cat.name() == sparkCatalog.name() => viewIdent
-      }
-      .foreach { viewIdent =>
-        val key = "view:" + viewIdent.toString
-        if (seen.add(key)) {
-          val icebergId =
-            TableIdentifier.of(Namespace.of(viewIdent.namespace(): _*), viewIdent.name())
-          try {
-            val view = icebergViewCatalog.loadView(icebergId)
-            states += new SourceViewState(
-              icebergId.name(),
-              icebergId.namespace().levels().toList.asJava,
-              null,
-              view.uuid().toString,
-              view.currentVersion().versionId())
-          } catch {
-            case _: Exception => // not a view, or the view can't be loaded
+      .collect { case view: org.apache.spark.sql.catalyst.plans.logical.View => view.desc }
+      .foreach { desc =>
+        val viewIdent = desc.identifier
+        if (viewIdent.catalog.contains(sparkCatalog.name())) {
+          val key = "view:" + viewIdent.unquotedString
+          if (seen.add(key)) {
+            val icebergId =
+              TableIdentifier.of(Namespace.of(viewIdent.database.toList: _*), viewIdent.table)
+            try {
+              val view = icebergViewCatalog.loadView(icebergId)
+              states += new SourceViewState(
+                icebergId.name(),
+                icebergId.namespace().levels().toList.asJava,
+                null,
+                view.uuid().toString,
+                view.currentVersion().versionId())
+            } catch {
+              case _: Exception => // the view can't be loaded
+            }
           }
         }
       }
