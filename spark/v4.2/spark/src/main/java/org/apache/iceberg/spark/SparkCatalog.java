@@ -36,6 +36,7 @@ import org.apache.iceberg.EnvironmentContext;
 import org.apache.iceberg.HasTableOperations;
 import org.apache.iceberg.MetadataTableType;
 import org.apache.iceberg.Schema;
+import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Transaction;
 import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.catalog.Namespace;
@@ -63,6 +64,11 @@ import org.apache.iceberg.spark.source.SparkView;
 import org.apache.iceberg.spark.source.StagedSparkTable;
 import org.apache.iceberg.util.Pair;
 import org.apache.iceberg.util.PropertyUtil;
+import org.apache.iceberg.view.RefreshState;
+import org.apache.iceberg.view.RefreshStateParser;
+import org.apache.iceberg.view.SourceState;
+import org.apache.iceberg.view.SourceTableState;
+import org.apache.iceberg.view.SourceViewState;
 import org.apache.iceberg.view.UpdateViewProperties;
 import org.apache.iceberg.view.ViewBuilder;
 import org.apache.iceberg.view.ViewProperties;
@@ -648,62 +654,78 @@ public class SparkCatalog extends BaseCatalog {
     }
 
     String refreshStateJson =
-        storageTable
-            .currentSnapshot()
-            .summary()
-            .get(org.apache.iceberg.view.RefreshState.REFRESH_STATE_SUMMARY_KEY);
+        storageTable.currentSnapshot().summary().get(RefreshState.REFRESH_STATE_SUMMARY_KEY);
     if (refreshStateJson == null) {
       return false;
     }
 
-    org.apache.iceberg.view.RefreshState refreshState =
-        org.apache.iceberg.view.RefreshStateParser.fromJson(refreshStateJson);
+    RefreshState refreshState = RefreshStateParser.fromJson(refreshStateJson);
 
     if (refreshState.viewVersionId() != view.currentVersion().versionId()) {
       return false;
     }
 
-    for (org.apache.iceberg.view.SourceState sourceState : refreshState.sourceStates()) {
-      if (sourceState instanceof org.apache.iceberg.view.SourceTableState) {
-        org.apache.iceberg.view.SourceTableState tableState =
-            (org.apache.iceberg.view.SourceTableState) sourceState;
-        org.apache.iceberg.catalog.TableIdentifier sourceId =
-            org.apache.iceberg.catalog.TableIdentifier.of(
-                org.apache.iceberg.catalog.Namespace.of(
-                    tableState.namespace().toArray(new String[0])),
-                tableState.name());
-        try {
-          org.apache.iceberg.Table sourceTable = icebergCatalog().loadTable(sourceId);
-          long currentSnapshotId =
-              sourceTable.currentSnapshot() == null
-                  ? -1
-                  : sourceTable.currentSnapshot().snapshotId();
-          if (currentSnapshotId != tableState.snapshotId()) {
-            return false;
-          }
-        } catch (Exception e) {
+    for (SourceState sourceState : refreshState.sourceStates()) {
+      if (sourceState instanceof SourceTableState) {
+        if (!isSourceFresh((SourceTableState) sourceState)) {
           return false;
         }
-      } else if (sourceState instanceof org.apache.iceberg.view.SourceViewState) {
-        org.apache.iceberg.view.SourceViewState viewState =
-            (org.apache.iceberg.view.SourceViewState) sourceState;
-        org.apache.iceberg.catalog.TableIdentifier sourceId =
-            org.apache.iceberg.catalog.TableIdentifier.of(
-                org.apache.iceberg.catalog.Namespace.of(
-                    viewState.namespace().toArray(new String[0])),
-                viewState.name());
-        try {
-          org.apache.iceberg.view.View sourceView = asViewCatalog.loadView(sourceId);
-          if (sourceView.currentVersion().versionId() != viewState.versionId()) {
-            return false;
-          }
-        } catch (Exception e) {
+      } else if (sourceState instanceof SourceViewState) {
+        if (!isSourceFresh((SourceViewState) sourceState)) {
           return false;
         }
       }
     }
 
     return true;
+  }
+
+  /**
+   * Returns whether a source table still matches the state captured by the last refresh.
+   *
+   * <p>A source is identified by its UUID as well as by its name because a table that was dropped
+   * and recreated, or replaced by an unrelated table with the same name, is not the table that was
+   * read. Snapshot ids alone cannot detect that: a recreated table restarts its history and an
+   * empty table records {@link RefreshState#NO_SNAPSHOT_ID} both before and after.
+   */
+  private boolean isSourceFresh(SourceTableState tableState) {
+    try {
+      org.apache.iceberg.Table sourceTable =
+          icebergCatalog().loadTable(sourceIdentifier(tableState));
+      if (!sourceTable.uuid().toString().equals(tableState.uuid())) {
+        return false;
+      }
+
+      Snapshot snapshot =
+          tableState.ref() == null
+              ? sourceTable.currentSnapshot()
+              : sourceTable.snapshot(tableState.ref());
+      long snapshotId = snapshot == null ? RefreshState.NO_SNAPSHOT_ID : snapshot.snapshotId();
+      return snapshotId == tableState.snapshotId();
+    } catch (Exception e) {
+      return false;
+    }
+  }
+
+  /**
+   * Returns whether a source view still matches the state captured by the last refresh.
+   *
+   * <p>The UUID check is essential here: view version ids restart at 1, so a view that was dropped
+   * and recreated with an unrelated definition would otherwise report the recorded version.
+   */
+  private boolean isSourceFresh(SourceViewState viewState) {
+    try {
+      org.apache.iceberg.view.View sourceView = asViewCatalog.loadView(sourceIdentifier(viewState));
+      return sourceView.uuid().toString().equals(viewState.uuid())
+          && sourceView.currentVersion().versionId() == viewState.versionId();
+    } catch (Exception e) {
+      return false;
+    }
+  }
+
+  private TableIdentifier sourceIdentifier(SourceState sourceState) {
+    return TableIdentifier.of(
+        Namespace.of(sourceState.namespace().toArray(new String[0])), sourceState.name());
   }
 
   @Override

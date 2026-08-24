@@ -386,6 +386,55 @@ public class TestMaterializedViews extends ExtensionsTestBase {
     sql("DROP VIEW IF EXISTS %s", sourceViewName);
   }
 
+  @TestTemplate
+  public void testStaleWhenSourceViewIsRecreated() {
+    String sourceViewName = "source_view";
+    sql("INSERT INTO %s VALUES (1, 'a'), (2, 'b'), (3, 'c')", tableName);
+    sql("CREATE VIEW %s AS SELECT id, data FROM %s WHERE id <= 2", sourceViewName, tableName);
+    sql(
+        "CREATE MATERIALIZED VIEW %s AS SELECT id, data FROM %s",
+        materializedViewName, sourceViewName);
+
+    sql("REFRESH MATERIALIZED VIEW %s", materializedViewName);
+    int refreshedVersionId = loadIcebergView(sourceViewName).currentVersion().versionId();
+
+    // Drop and recreate the source view with an unrelated definition. Version ids restart at 1,
+    // so the recreated view reports the same version that the refresh recorded and only the
+    // view's UUID identifies it as a different view.
+    sql("DROP VIEW %s", sourceViewName);
+    sql("CREATE VIEW %s AS SELECT id, data FROM %s WHERE id > 2", sourceViewName, tableName);
+    assertThat(loadIcebergView(sourceViewName).currentVersion().versionId())
+        .isEqualTo(refreshedVersionId);
+
+    assertThatThrownBy(() -> sparkTableCatalog().loadTable(viewIdentifier()))
+        .isInstanceOf(NoSuchTableException.class)
+        .hasMessageContaining(materializedViewName);
+
+    sql("DROP VIEW IF EXISTS %s", sourceViewName);
+  }
+
+  @TestTemplate
+  public void testStaleWhenEmptySourceTableIsRecreated() {
+    sql("CREATE MATERIALIZED VIEW %s AS SELECT id, data FROM %s", materializedViewName, tableName);
+
+    sql("REFRESH MATERIALIZED VIEW %s", materializedViewName);
+    try {
+      assertThat(sparkTableCatalog().loadTable(viewIdentifier()))
+          .isInstanceOf(SparkMaterializedView.class);
+    } catch (NoSuchTableException e) {
+      fail("Refreshed materialized view should be loadable as a table");
+    }
+
+    // Drop and recreate the empty source table. The recorded and the current state both report
+    // no snapshot, so only the table's UUID identifies it as a different table.
+    sql("DROP TABLE %s", tableName);
+    sql("CREATE TABLE %s (id INT, data STRING)", tableName);
+
+    assertThatThrownBy(() -> sparkTableCatalog().loadTable(viewIdentifier()))
+        .isInstanceOf(NoSuchTableException.class)
+        .hasMessageContaining(materializedViewName);
+  }
+
   private RefreshState loadRefreshState() {
     View view = loadIcebergView();
     org.apache.iceberg.catalog.TableIdentifier storageTableId =
@@ -401,6 +450,9 @@ public class TestMaterializedViews extends ExtensionsTestBase {
     View view = loadIcebergView();
     org.apache.iceberg.catalog.TableIdentifier storageTableId =
         view.currentVersion().storageTable();
+
+    org.apache.iceberg.Table baseTable =
+        sparkCatalog().icebergCatalog().loadTable(TableIdentifier.of(NAMESPACE, tableName));
 
     // Get the base table's current snapshot ID
     long baseSnapshotId =
@@ -419,7 +471,7 @@ public class TestMaterializedViews extends ExtensionsTestBase {
                     tableName,
                     Arrays.asList(NAMESPACE.levels()),
                     null,
-                    "test-uuid",
+                    baseTable.uuid().toString(),
                     baseSnapshotId,
                     null)),
             System.currentTimeMillis());

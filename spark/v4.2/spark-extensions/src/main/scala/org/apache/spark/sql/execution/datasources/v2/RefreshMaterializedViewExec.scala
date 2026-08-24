@@ -22,6 +22,7 @@ import org.apache.iceberg.catalog.Namespace
 import org.apache.iceberg.catalog.TableIdentifier
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions
 import org.apache.iceberg.spark.SparkCatalog
+import org.apache.iceberg.spark.source.SparkTable
 import org.apache.iceberg.view.RefreshState
 import org.apache.iceberg.view.RefreshStateParser
 import org.apache.iceberg.view.SourceTableState
@@ -127,19 +128,22 @@ case class RefreshMaterializedViewExec(catalog: ViewCatalog, ident: Identifier)
             TableIdentifier.of(Namespace.of(tableIdent.namespace(): _*), tableIdent.name())
           try {
             val table = icebergCatalog.loadTable(icebergId)
+            // Record the ref that was actually read so that freshness is later checked against
+            // that ref rather than against the table's current snapshot.
+            val ref = r.table match {
+              case sparkTable: SparkTable => sparkTable.branch()
+              case _ => null
+            }
+            val snapshot = if (ref != null) table.snapshot(ref) else table.currentSnapshot()
             val snapshotId =
-              if (table.currentSnapshot() != null) {
-                table.currentSnapshot().snapshotId()
-              } else {
-                -1L
-              }
+              if (snapshot != null) snapshot.snapshotId() else RefreshState.NO_SNAPSHOT_ID
             states += new SourceTableState(
               icebergId.name(),
               icebergId.namespace().levels().toList.asJava,
               null,
               table.uuid().toString,
               snapshotId,
-              null)
+              ref)
           } catch {
             case _: Exception => // skip tables we can't load
           }
