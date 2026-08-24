@@ -52,6 +52,7 @@ import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchViewException;
 import org.apache.spark.sql.connector.catalog.CatalogPlugin;
 import org.apache.spark.sql.connector.catalog.Identifier;
+import org.apache.spark.sql.connector.catalog.RelationCatalog;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.apache.spark.sql.connector.catalog.ViewCatalog;
 import org.junit.jupiter.api.AfterEach;
@@ -160,10 +161,21 @@ public class TestMaterializedViews extends ExtensionsTestBase {
       fail("Fresh materialized view should be loadable as a table");
     }
 
-    // Fresh MV: loadView should throw since the engine should use loadTable instead
-    assertThatThrownBy(() -> sparkViewCatalog().loadView(viewIdentifier()))
-        .isInstanceOf(IllegalStateException.class)
-        .hasMessageContaining("fresh");
+    // Fresh MV: loadRelation routes to the storage table rather than the view definition
+    try {
+      assertThat(sparkRelationCatalog().loadRelation(viewIdentifier()))
+          .isInstanceOf(SparkMaterializedView.class);
+    } catch (NoSuchTableException e) {
+      fail("Fresh materialized view should be resolvable as a relation");
+    }
+
+    // Fresh MV: loadView still returns the view definition instead of signalling via an exception
+    try {
+      assertThat(sparkViewCatalog().loadView(viewIdentifier()))
+          .isInstanceOf(org.apache.spark.sql.connector.catalog.View.class);
+    } catch (NoSuchViewException e) {
+      fail("Materialized view not found");
+    }
   }
 
   @TestTemplate
@@ -182,6 +194,14 @@ public class TestMaterializedViews extends ExtensionsTestBase {
           .isInstanceOf(org.apache.spark.sql.connector.catalog.View.class);
     } catch (NoSuchViewException e) {
       fail("Stale materialized view should be loadable as a view");
+    }
+
+    // Stale MV: loadRelation routes to the view definition, not the storage table
+    try {
+      assertThat(sparkRelationCatalog().loadRelation(viewIdentifier()))
+          .isNotInstanceOf(SparkMaterializedView.class);
+    } catch (NoSuchTableException e) {
+      fail("Stale materialized view should be resolvable as a relation");
     }
 
     // Stale MV: loadTable should not resolve to the MV's storage table
@@ -427,6 +447,11 @@ public class TestMaterializedViews extends ExtensionsTestBase {
   private TableCatalog sparkTableCatalog() {
     CatalogPlugin catalogPlugin = spark.sessionState().catalogManager().catalog(catalogName);
     return (TableCatalog) catalogPlugin;
+  }
+
+  private RelationCatalog sparkRelationCatalog() {
+    CatalogPlugin catalogPlugin = spark.sessionState().catalogManager().catalog(catalogName);
+    return (RelationCatalog) catalogPlugin;
   }
 
   private Identifier viewIdentifier() {

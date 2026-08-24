@@ -76,6 +76,7 @@ import org.apache.spark.sql.catalyst.analysis.ViewAlreadyExistsException;
 import org.apache.spark.sql.catalyst.analysis.ViewUtil;
 import org.apache.spark.sql.connector.catalog.Identifier;
 import org.apache.spark.sql.connector.catalog.NamespaceChange;
+import org.apache.spark.sql.connector.catalog.Relation;
 import org.apache.spark.sql.connector.catalog.StagedTable;
 import org.apache.spark.sql.connector.catalog.Table;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
@@ -565,20 +566,55 @@ public class SparkCatalog extends BaseCatalog {
   @Override
   public View loadView(Identifier ident) throws NoSuchViewException {
     if (null != asViewCatalog) {
-      try {
-        org.apache.iceberg.view.View view = asViewCatalog.loadView(buildIdentifier(ident));
-        if (isMaterializedView(view) && isFresh(view)) {
-          throw new IllegalStateException(
-              "Materialized view is fresh. loadTable should be attempted instead.");
-        } else {
-          return SparkView.toView(catalogName, view);
-        }
-      } catch (org.apache.iceberg.exceptions.NoSuchViewException e) {
-        throw new NoSuchViewException(ident);
+      org.apache.iceberg.view.View view = findIcebergView(ident);
+      if (null != view) {
+        return SparkView.toView(catalogName, view);
       }
+
+      throw new NoSuchViewException(ident);
     }
 
     throw new NoSuchViewException(ident);
+  }
+
+  /**
+   * Loads the Iceberg view for an identifier, or returns null when no such view exists.
+   *
+   * <p>Materialized view routing is decided by {@link #loadRelation(Identifier)}, which prefers the
+   * storage table for a fresh view, so this lookup reports absence instead of signalling control
+   * flow through exceptions.
+   */
+  private org.apache.iceberg.view.View findIcebergView(Identifier ident) {
+    if (null == asViewCatalog) {
+      return null;
+    }
+
+    try {
+      return asViewCatalog.loadView(buildIdentifier(ident));
+    } catch (org.apache.iceberg.exceptions.NoSuchViewException e) {
+      return null;
+    }
+  }
+
+  /**
+   * Resolves an identifier that may name either a table or a view.
+   *
+   * <p>A materialized view is served from its storage table while it is fresh, and from its view
+   * definition otherwise, so the choice is made here rather than by having {@code loadView} signal
+   * the engine to retry with {@code loadTable}.
+   */
+  @Override
+  public Relation loadRelation(Identifier ident) throws NoSuchTableException {
+    if (!isPathIdentifier(ident)) {
+      org.apache.iceberg.view.View view = findIcebergView(ident);
+      if (null != view && isMaterializedView(view)) {
+        return isFresh(view)
+            ? new SparkMaterializedView(catalogName, view, loadStorageTable(view))
+            : SparkView.toView(catalogName, view);
+      }
+    }
+
+    return super.loadRelation(ident);
   }
 
   private boolean isMaterializedView(org.apache.iceberg.view.View view) {
@@ -1027,17 +1063,10 @@ public class SparkCatalog extends BaseCatalog {
       return loadPath((PathIdentifier) ident, timeTravel);
     }
 
-    // Check if materialized view. If fresh, return the SparkMaterializedView.
-    if (null != asViewCatalog) {
-      try {
-        org.apache.iceberg.view.View view = asViewCatalog.loadView(buildIdentifier(ident));
-        if (isMaterializedView(view) && isFresh(view)) {
-          Table storageTable = loadStorageTable(view);
-          return new SparkMaterializedView(catalogName, view, storageTable);
-        }
-      } catch (org.apache.iceberg.exceptions.NoSuchViewException e) {
-        // Ignore. Just process as a normal table.
-      }
+    // A fresh materialized view is readable as its storage table.
+    org.apache.iceberg.view.View view = findIcebergView(ident);
+    if (null != view && isMaterializedView(view) && isFresh(view)) {
+      return new SparkMaterializedView(catalogName, view, loadStorageTable(view));
     }
 
     try {
