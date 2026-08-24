@@ -127,21 +127,34 @@ case class RefreshMaterializedViewExec(catalog: ViewCatalog, ident: Identifier)
           val icebergId =
             TableIdentifier.of(Namespace.of(tableIdent.namespace(): _*), tableIdent.name())
           try {
-            val table = icebergCatalog.loadTable(icebergId)
-            // Record the ref that was actually read so that freshness is later checked against
-            // that ref rather than against the table's current snapshot.
-            val ref = r.table match {
-              case sparkTable: SparkTable => sparkTable.branch()
-              case _ => null
+            // A SparkTable resolves its snapshot when the relation is resolved and the scan
+            // reads exactly that snapshot, so the state is taken from the relation rather
+            // than from a second load of the table. Loading the table again would observe
+            // whatever snapshot is current now, which may already be newer than the one this
+            // refresh reads, and the recorded state would then describe data that was never
+            // written. The ref is recorded alongside the snapshot so that freshness is later
+            // checked against the ref that was read rather than against the main branch.
+            val (uuid, ref, snapshotId) = r.table match {
+              case sparkTable: SparkTable =>
+                val pinnedSnapshotId = sparkTable.snapshotId()
+                (
+                  sparkTable.table().uuid().toString,
+                  sparkTable.branch(),
+                  if (pinnedSnapshotId != null) pinnedSnapshotId.longValue()
+                  else RefreshState.NO_SNAPSHOT_ID)
+              case _ =>
+                val table = icebergCatalog.loadTable(icebergId)
+                val snapshot = table.currentSnapshot()
+                (
+                  table.uuid().toString,
+                  null,
+                  if (snapshot != null) snapshot.snapshotId() else RefreshState.NO_SNAPSHOT_ID)
             }
-            val snapshot = if (ref != null) table.snapshot(ref) else table.currentSnapshot()
-            val snapshotId =
-              if (snapshot != null) snapshot.snapshotId() else RefreshState.NO_SNAPSHOT_ID
             states += new SourceTableState(
               icebergId.name(),
               icebergId.namespace().levels().toList.asJava,
               null,
-              table.uuid().toString,
+              uuid,
               snapshotId,
               ref)
           } catch {
