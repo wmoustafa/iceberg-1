@@ -26,6 +26,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
@@ -154,6 +155,74 @@ public class TestSinkWriter {
   }
 
   @Test
+  public void testOffsetTrackedByOriginalTopicPartition() {
+    IcebergSinkConfig config = mock(IcebergSinkConfig.class);
+    when(config.tableConfig(any())).thenReturn(mock(TableSinkConfig.class));
+    when(config.tables()).thenReturn(ImmutableList.of(TABLE_IDENTIFIER.toString()));
+    when(config.dynamicTablesEnabled()).thenReturn(true);
+    when(config.tablesRouteField()).thenReturn(ROUTE_FIELD);
+
+    IcebergWriterResult writeResult =
+        new IcebergWriterResult(
+            TableIdentifier.parse(TABLE_NAME),
+            ImmutableList.of(mock(DataFile.class)),
+            ImmutableList.of(),
+            Types.StructType.of());
+    IcebergWriter writer = mock(IcebergWriter.class);
+    when(writer.complete()).thenReturn(ImmutableList.of(writeResult));
+
+    IcebergWriterFactory writerFactory = mock(IcebergWriterFactory.class);
+    when(writerFactory.createWriter(any(), any(), anyBoolean())).thenReturn(writer);
+
+    SinkWriter sinkWriter = new SinkWriter(catalog, config);
+
+    // simulate a record that has been transformed by RegexRouter (topic changed)
+    String originalTopic = "orders";
+    int originalPartition = 0;
+    long originalOffset = 42L;
+    Instant now = Instant.now().truncatedTo(ChronoUnit.MILLIS);
+
+    SinkRecord original =
+        new SinkRecord(
+            originalTopic,
+            originalPartition,
+            null,
+            "key",
+            null,
+            ImmutableMap.of(ROUTE_FIELD, TABLE_IDENTIFIER.toString()),
+            originalOffset,
+            now.toEpochMilli(),
+            TimestampType.LOG_APPEND_TIME);
+
+    // RegexRouter changes the topic via newRecord
+    String transformedTopic = "tmp.dynamic_orders";
+    SinkRecord transformed =
+        original.newRecord(
+            transformedTopic,
+            originalPartition,
+            original.keySchema(),
+            original.key(),
+            original.valueSchema(),
+            original.value(),
+            original.timestamp());
+
+    sinkWriter.save(ImmutableList.of(transformed));
+    SinkWriterResult result = sinkWriter.completeWrite();
+
+    // offsets must be keyed by the ORIGINAL topic, not the transformed one
+    Offset offset =
+        result.sourceOffsets().get(new TopicPartition(originalTopic, originalPartition));
+    assertThat(offset).isNotNull();
+    assertThat(offset.offset()).isEqualTo(originalOffset + 1);
+    assertThat(offset.timestamp()).isEqualTo(now.atOffset(ZoneOffset.UTC));
+
+    // the transformed topic key should NOT be present
+    Offset wrongOffset =
+        result.sourceOffsets().get(new TopicPartition(transformedTopic, originalPartition));
+    assertThat(wrongOffset).isNull();
+  }
+
+  @Test
   public void testDynamicNoRoute() {
     IcebergSinkConfig config = mock(IcebergSinkConfig.class);
     when(config.tables()).thenReturn(ImmutableList.of(TABLE_IDENTIFIER.toString()));
@@ -165,6 +234,47 @@ public class TestSinkWriter {
 
     List<IcebergWriterResult> writerResults = sinkWriterTest(value, config);
     assertThat(writerResults).hasSize(0);
+  }
+
+  @Test
+  public void testEvolveAddsFractionalDecimalColumn() {
+    IcebergSinkConfig config = mock(IcebergSinkConfig.class);
+    when(config.tableConfig(any())).thenReturn(mock(TableSinkConfig.class));
+    when(config.tables()).thenReturn(ImmutableList.of(TABLE_IDENTIFIER.toString()));
+    when(config.evolveSchemaEnabled()).thenReturn(true);
+
+    // a new column whose value is a fractional decimal < 1: BigDecimal("0.001") has precision 1
+    // and scale 3. DecimalType.of validates only precision <= 38, so before the fix the column
+    // evolved to a malformed decimal(1, 3) without error and the write below failed in the
+    // Parquet writer; after the fix it evolves to decimal(3, 3) and the record is written.
+    Map<String, Object> value = ImmutableMap.of("amount", new BigDecimal("0.001"));
+
+    List<IcebergWriterResult> writerResults = sinkWriterTest(value, config);
+    assertThat(writerResults).isNotEmpty();
+
+    // the column evolved to a valid decimal that can hold 0.001 (scale <= precision)
+    Types.NestedField added = catalog.loadTable(TABLE_IDENTIFIER).schema().findField("amount");
+    assertThat(added).isNotNull();
+    assertThat(added.type()).isEqualTo(Types.DecimalType.of(3, 3));
+  }
+
+  @Test
+  public void testEvolveAddsExponentialDecimalColumn() {
+    IcebergSinkConfig config = mock(IcebergSinkConfig.class);
+    when(config.tableConfig(any())).thenReturn(mock(TableSinkConfig.class));
+    when(config.tables()).thenReturn(ImmutableList.of(TABLE_IDENTIFIER.toString()));
+    when(config.evolveSchemaEnabled()).thenReturn(true);
+
+    // BigDecimal("1E+2") has a negative scale (-2), which is normalized to decimal(3, 0), the
+    // same type inferred for new BigDecimal("100"); the value is rescaled when it is written
+    Map<String, Object> value = ImmutableMap.of("amount", new BigDecimal("1E+2"));
+
+    List<IcebergWriterResult> writerResults = sinkWriterTest(value, config);
+    assertThat(writerResults).isNotEmpty();
+
+    Types.NestedField added = catalog.loadTable(TABLE_IDENTIFIER).schema().findField("amount");
+    assertThat(added).isNotNull();
+    assertThat(added.type()).isEqualTo(Types.DecimalType.of(3, 0));
   }
 
   private List<IcebergWriterResult> sinkWriterTest(

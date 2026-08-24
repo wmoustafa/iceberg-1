@@ -34,6 +34,7 @@ import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.analysis.MaterializedViewOptions
 import org.apache.spark.sql.catalyst.analysis.RewriteViewCommands
 import org.apache.spark.sql.catalyst.expressions.Expression
+import org.apache.spark.sql.catalyst.parser.ParameterContext
 import org.apache.spark.sql.catalyst.parser.ParserInterface
 import org.apache.spark.sql.catalyst.parser.extensions.IcebergSqlExtensionsParser.NonReservedContext
 import org.apache.spark.sql.catalyst.parser.extensions.IcebergSqlExtensionsParser.QuotedIdentifierContext
@@ -121,7 +122,28 @@ class IcebergSparkSqlExtensionsParser(delegate: ParserInterface)
   /**
    * Parse a string to a LogicalPlan.
    */
-  override def parsePlan(sqlText: String): LogicalPlan = {
+  override def parsePlan(sqlText: String): LogicalPlan =
+    parsePlanWithDelegate(sqlText)(delegate.parsePlan)
+
+  /**
+   * Parse a string to a LogicalPlan, binding the given parameters.
+   *
+   * Iceberg DDL grammars do not accept parameter markers (`?` / `:name`), so the
+   * parameterContext is only forwarded to the delegate on the non-Iceberg path.
+   */
+  override def parsePlanWithParameters(
+      sqlText: String,
+      parameterContext: ParameterContext): LogicalPlan =
+    parsePlanWithDelegate(sqlText) { sql =>
+      delegate.parsePlanWithParameters(sql, parameterContext)
+    }
+
+  /**
+   * Dispatch parsing: Iceberg commands are parsed by the extensions parser, everything else is
+   * handed to the wrapped Spark parser via `delegateParse`.
+   */
+  private def parsePlanWithDelegate(sqlText: String)(
+      delegateParse: String => LogicalPlan): LogicalPlan = {
     val sqlTextAfterSubstitution = substitutor.substitute(sqlText)
     if (isIcebergCommand(sqlTextAfterSubstitution)) {
       parse(sqlTextAfterSubstitution) { parser => astBuilder.visit(parser.singleStatement()) }
@@ -132,7 +154,7 @@ class IcebergSparkSqlExtensionsParser(delegate: ParserInterface)
     } else if (isRefreshMaterializedView(sqlText)) {
       parseRefreshMaterializedView(sqlText)
     } else {
-      RewriteViewCommands(SparkSession.active).apply(delegate.parsePlan(sqlText))
+      RewriteViewCommands(SparkSession.active).apply(delegateParse(sqlText))
     }
   }
 

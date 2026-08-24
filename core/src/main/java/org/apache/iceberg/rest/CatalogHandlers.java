@@ -470,7 +470,8 @@ public class CatalogHandlers {
     request.validate();
 
     TableIdentifier identifier = TableIdentifier.of(namespace, request.name());
-    Table table = catalog.registerTable(identifier, request.metadataLocation());
+    Table table =
+        catalog.registerTable(identifier, request.metadataLocation(), request.overwrite());
     if (table instanceof BaseTable) {
       return LoadTableResponse.builder()
           .withTableMetadata(((BaseTable) table).operations().current())
@@ -536,7 +537,7 @@ public class CatalogHandlers {
       return LoadTableResponse.builder().withTableMetadata(metadata).build();
     } else if (table instanceof BaseMetadataTable) {
       // metadata tables are loaded on the client side, return NoSuchTableException for now
-      throw new NoSuchTableException("Table does not exist: %s", ident.toString());
+      throw new NoSuchTableException("Table does not exist: %s", ident);
     }
 
     throw new IllegalStateException("Cannot wrap catalog that does not produce BaseTable");

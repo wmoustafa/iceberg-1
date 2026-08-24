@@ -28,6 +28,7 @@ import org.apache.iceberg.DataFile;
 import org.apache.iceberg.HistoryEntry;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Snapshot;
+import org.apache.iceberg.SnapshotChanges;
 import org.apache.iceberg.SnapshotRef;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableMetadata;
@@ -284,8 +285,8 @@ public class SnapshotUtil {
   }
 
   /**
-   * @deprecated will be removed in 1.12.0, use {@link #newFilesBetween(Long, long, Function,
-   *     FileIO)} instead.
+   * @deprecated will be removed in 1.12.0, use {@link SnapshotChanges} with {@link
+   *     #ancestorsBetween(long, Long, Function)} instead.
    */
   @Deprecated
   public static List<DataFile> newFiles(
@@ -310,6 +311,11 @@ public class SnapshotUtil {
     return newFiles;
   }
 
+  /**
+   * @deprecated will be removed in 1.12.0, use {@link SnapshotChanges} with {@link
+   *     #ancestorsBetween(long, Long, Function)} instead.
+   */
+  @Deprecated
   public static CloseableIterable<DataFile> newFilesBetween(
       Long startSnapshotId, long endSnapshotId, Function<Long, Snapshot> lookup, FileIO io) {
 
@@ -384,9 +390,12 @@ public class SnapshotUtil {
 
   public static Long nullableSnapshotIdAsOfTime(Table table, long timestampMillis) {
     Long snapshotId = null;
+    long bestTimestamp = Long.MIN_VALUE;
     for (HistoryEntry logEntry : table.history()) {
-      if (logEntry.timestampMillis() <= timestampMillis) {
+      if (logEntry.timestampMillis() <= timestampMillis
+          && logEntry.timestampMillis() > bestTimestamp) {
         snapshotId = logEntry.snapshotId();
+        bestTimestamp = logEntry.timestampMillis();
       }
     }
 
