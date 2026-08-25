@@ -147,8 +147,11 @@ case class RefreshMaterializedViewExec(catalog: ViewCatalog, ident: Identifier)
                 (
                   sparkTable.table().uuid().toString,
                   sparkTable.branch(),
-                  if (pinnedSnapshotId != null) pinnedSnapshotId.longValue()
-                  else RefreshState.NO_SNAPSHOT_ID)
+                  if (pinnedSnapshotId != null) {
+                    pinnedSnapshotId.longValue()
+                  } else {
+                    RefreshState.NO_SNAPSHOT_ID
+                  })
               case _ =>
                 val table = sourceCatalog.icebergCatalog().loadTable(icebergId)
                 val snapshot = table.currentSnapshot()
