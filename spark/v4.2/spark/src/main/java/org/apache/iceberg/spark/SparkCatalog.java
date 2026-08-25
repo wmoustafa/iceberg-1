@@ -57,6 +57,7 @@ import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.relocated.com.google.common.collect.Sets;
 import org.apache.iceberg.rest.RESTCatalog;
 import org.apache.iceberg.spark.actions.SparkActions;
+import org.apache.iceberg.spark.source.HasIcebergCatalog;
 import org.apache.iceberg.spark.source.SparkChangelogTable;
 import org.apache.iceberg.spark.source.SparkMaterializedView;
 import org.apache.iceberg.spark.source.SparkTable;
@@ -80,6 +81,7 @@ import org.apache.spark.sql.catalyst.analysis.NoSuchViewException;
 import org.apache.spark.sql.catalyst.analysis.TableAlreadyExistsException;
 import org.apache.spark.sql.catalyst.analysis.ViewAlreadyExistsException;
 import org.apache.spark.sql.catalyst.analysis.ViewUtil;
+import org.apache.spark.sql.connector.catalog.CatalogPlugin;
 import org.apache.spark.sql.connector.catalog.Identifier;
 import org.apache.spark.sql.connector.catalog.NamespaceChange;
 import org.apache.spark.sql.connector.catalog.Relation;
@@ -691,7 +693,7 @@ public class SparkCatalog extends BaseCatalog {
   private boolean isSourceFresh(SourceTableState tableState) {
     try {
       org.apache.iceberg.Table sourceTable =
-          icebergCatalog().loadTable(sourceIdentifier(tableState));
+          sourceCatalog(tableState).loadTable(sourceIdentifier(tableState));
       if (!sourceTable.uuid().toString().equals(tableState.uuid())) {
         return false;
       }
@@ -715,12 +717,35 @@ public class SparkCatalog extends BaseCatalog {
    */
   private boolean isSourceFresh(SourceViewState viewState) {
     try {
-      org.apache.iceberg.view.View sourceView = asViewCatalog.loadView(sourceIdentifier(viewState));
+      org.apache.iceberg.view.View sourceView =
+          ((ViewCatalog) sourceCatalog(viewState)).loadView(sourceIdentifier(viewState));
       return sourceView.uuid().toString().equals(viewState.uuid())
           && sourceView.currentVersion().versionId() == viewState.versionId();
     } catch (Exception e) {
       return false;
     }
+  }
+
+  /**
+   * Returns the Iceberg catalog that holds a source object.
+   *
+   * <p>A materialized view may read sources from a catalog other than its own, so a recorded
+   * catalog name is resolved through Spark's catalog manager rather than assumed to be this
+   * catalog. Callers treat a failure to resolve as "not fresh", since a source that cannot be
+   * reached cannot be shown to be unchanged.
+   */
+  private Catalog sourceCatalog(SourceState sourceState) {
+    if (sourceState.catalog() == null) {
+      return icebergCatalog();
+    }
+
+    CatalogPlugin plugin =
+        SparkSession.active().sessionState().catalogManager().catalog(sourceState.catalog());
+    Preconditions.checkArgument(
+        plugin instanceof HasIcebergCatalog,
+        "Cannot resolve source catalog %s: not an Iceberg catalog",
+        sourceState.catalog());
+    return ((HasIcebergCatalog) plugin).icebergCatalog();
   }
 
   private TableIdentifier sourceIdentifier(SourceState sourceState) {

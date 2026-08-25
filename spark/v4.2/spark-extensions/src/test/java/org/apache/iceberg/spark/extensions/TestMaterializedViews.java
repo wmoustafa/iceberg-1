@@ -42,6 +42,7 @@ import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.spark.MaterializedViewUtil;
 import org.apache.iceberg.spark.SparkCatalog;
 import org.apache.iceberg.spark.SparkCatalogConfig;
+import org.apache.iceberg.spark.SparkSessionCatalog;
 import org.apache.iceberg.spark.source.SparkMaterializedView;
 import org.apache.iceberg.view.RefreshState;
 import org.apache.iceberg.view.RefreshStateParser;
@@ -433,6 +434,131 @@ public class TestMaterializedViews extends ExtensionsTestBase {
     assertThatThrownBy(() -> sparkTableCatalog().loadTable(viewIdentifier()))
         .isInstanceOf(NoSuchTableException.class)
         .hasMessageContaining(materializedViewName);
+  }
+
+  @TestTemplate
+  public void testCrossCatalogSourceTable() {
+    String otherCatalogName =
+        "other_catalog_" + java.util.UUID.randomUUID().toString().replace("-", "");
+    String sourceTableName = "cross_catalog_source";
+    configureCatalog(otherCatalogName);
+
+    sql("CREATE NAMESPACE IF NOT EXISTS %s.%s", otherCatalogName, NAMESPACE);
+    sql(
+        "CREATE TABLE %s.%s.%s (id INT, data STRING)",
+        otherCatalogName, NAMESPACE, sourceTableName);
+    sql(
+        "INSERT INTO %s.%s.%s VALUES (1, 'a'), (2, 'b')",
+        otherCatalogName, NAMESPACE, sourceTableName);
+
+    sql(
+        "CREATE MATERIALIZED VIEW %s AS SELECT id, data FROM %s.%s.%s",
+        materializedViewName, otherCatalogName, NAMESPACE, sourceTableName);
+    sql("REFRESH MATERIALIZED VIEW %s", materializedViewName);
+
+    // The source table lives in another catalog, so the refresh must record it with that
+    // catalog name in order for freshness to be checkable at all.
+    RefreshState refreshState = loadRefreshState();
+    assertThat(refreshState.sourceStates()).hasSize(1);
+    SourceTableState tableState = (SourceTableState) refreshState.sourceStates().get(0);
+    assertThat(tableState.name()).isEqualTo(sourceTableName);
+    assertThat(tableState.catalog()).isEqualTo(otherCatalogName);
+
+    sql("DROP TABLE IF EXISTS %s.%s.%s", otherCatalogName, NAMESPACE, sourceTableName);
+  }
+
+  @TestTemplate
+  public void testCrossCatalogSourceTableChangeMakesMvStale() {
+    String otherCatalogName =
+        "other_catalog_" + java.util.UUID.randomUUID().toString().replace("-", "");
+    String sourceTableName = "cross_catalog_source";
+    configureCatalog(otherCatalogName);
+
+    sql("CREATE NAMESPACE IF NOT EXISTS %s.%s", otherCatalogName, NAMESPACE);
+    sql(
+        "CREATE TABLE %s.%s.%s (id INT, data STRING)",
+        otherCatalogName, NAMESPACE, sourceTableName);
+    sql(
+        "INSERT INTO %s.%s.%s VALUES (1, 'a'), (2, 'b')",
+        otherCatalogName, NAMESPACE, sourceTableName);
+
+    sql(
+        "CREATE MATERIALIZED VIEW %s AS SELECT id, data FROM %s.%s.%s",
+        materializedViewName, otherCatalogName, NAMESPACE, sourceTableName);
+    sql("REFRESH MATERIALIZED VIEW %s", materializedViewName);
+
+    // Changing the cross-catalog source must make the materialized view stale.
+    sql("INSERT INTO %s.%s.%s VALUES (3, 'c')", otherCatalogName, NAMESPACE, sourceTableName);
+
+    try {
+      assertThat(sparkRelationCatalog().loadRelation(viewIdentifier()))
+          .isNotInstanceOf(SparkMaterializedView.class);
+    } catch (NoSuchTableException e) {
+      fail("Stale materialized view should be resolvable as a relation");
+    }
+
+    assertThat(sql("SELECT * FROM %s.%s.%s", catalogName, NAMESPACE, materializedViewName))
+        .hasSize(3);
+
+    sql("DROP TABLE IF EXISTS %s.%s.%s", otherCatalogName, NAMESPACE, sourceTableName);
+  }
+
+  private void configureCatalog(String name) {
+    Map<String, String> properties =
+        Maps.newHashMap(SparkCatalogConfig.SPARK_WITH_MATERIALIZED_VIEWS.properties());
+    properties.put(CatalogProperties.WAREHOUSE_LOCATION, "file:" + getTempWarehouseDir());
+    properties.put(CatalogProperties.CATALOG_IMPL, InMemoryCatalogWithLocalFileIO.class.getName());
+    spark.conf().set("spark.sql.catalog." + name, implementation);
+    properties.forEach(
+        (key, value) -> spark.conf().set("spark.sql.catalog." + name + "." + key, value));
+  }
+
+  /**
+   * Verifies that a source reached through the session catalog is tracked.
+   *
+   * <p>SparkSessionCatalog is a sibling of SparkCatalog rather than a subclass, so a type test
+   * against SparkCatalog would skip these sources at refresh, leaving the materialized view with no
+   * recorded sources and therefore permanently fresh.
+   */
+  @TestTemplate
+  public void testSourceTableInSessionCatalog() {
+    String sourceTableName = "session_catalog_source";
+    configureSessionCatalog();
+
+    sql(
+        "CREATE TABLE IF NOT EXISTS spark_catalog.%s.%s (id INT, data STRING) USING iceberg",
+        NAMESPACE, sourceTableName);
+    sql("INSERT INTO spark_catalog.%s.%s VALUES (1, 'a'), (2, 'b')", NAMESPACE, sourceTableName);
+
+    sql(
+        "CREATE MATERIALIZED VIEW %s AS SELECT id, data FROM spark_catalog.%s.%s",
+        materializedViewName, NAMESPACE, sourceTableName);
+    sql("REFRESH MATERIALIZED VIEW %s", materializedViewName);
+
+    RefreshState refreshState = loadRefreshState();
+    assertThat(refreshState.sourceStates()).hasSize(1);
+    SourceTableState tableState = (SourceTableState) refreshState.sourceStates().get(0);
+    assertThat(tableState.name()).isEqualTo(sourceTableName);
+    assertThat(tableState.catalog()).isEqualTo("spark_catalog");
+
+    // Changing the source in the session catalog must make the materialized view stale.
+    sql("INSERT INTO spark_catalog.%s.%s VALUES (3, 'c')", NAMESPACE, sourceTableName);
+
+    try {
+      assertThat(sparkRelationCatalog().loadRelation(viewIdentifier()))
+          .isNotInstanceOf(SparkMaterializedView.class);
+    } catch (NoSuchTableException e) {
+      fail("Stale materialized view should be resolvable as a relation");
+    }
+
+    sql("DROP TABLE IF EXISTS spark_catalog.%s.%s", NAMESPACE, sourceTableName);
+  }
+
+  private void configureSessionCatalog() {
+    spark.conf().set("spark.sql.catalog.spark_catalog", SparkSessionCatalog.class.getName());
+    spark.conf().set("spark.sql.catalog.spark_catalog.type", "hive");
+    spark.conf().set("spark.sql.catalog.spark_catalog.default-namespace", "default");
+    spark.conf().set("spark.sql.catalog.spark_catalog.cache-enabled", "false");
   }
 
   private RefreshState loadRefreshState() {

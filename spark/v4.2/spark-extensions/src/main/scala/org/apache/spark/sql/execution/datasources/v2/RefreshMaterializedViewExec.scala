@@ -22,6 +22,7 @@ import org.apache.iceberg.catalog.Namespace
 import org.apache.iceberg.catalog.TableIdentifier
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions
 import org.apache.iceberg.spark.SparkCatalog
+import org.apache.iceberg.spark.source.HasIcebergCatalog
 import org.apache.iceberg.spark.source.SparkTable
 import org.apache.iceberg.view.RefreshState
 import org.apache.iceberg.view.RefreshStateParser
@@ -102,24 +103,36 @@ case class RefreshMaterializedViewExec(catalog: ViewCatalog, ident: Identifier)
     Nil
   }
 
+  /**
+   * Returns the catalog name to record for a source, or null when the source is in the
+   * materialized view's own catalog.
+   *
+   * <p>A null catalog keeps refresh state portable: a materialized view and its sources that live
+   * in the same catalog stay resolvable when that catalog is registered under a different name.
+   */
+  private def sourceCatalogName(sourceCatalog: HasIcebergCatalog): String = {
+    if (sourceCatalog.name() == catalog.name()) null else sourceCatalog.name()
+  }
+
   private def collectSourceStates(plan: org.apache.spark.sql.catalyst.plans.logical.LogicalPlan)
       : List[org.apache.iceberg.view.SourceState] = {
-    val sparkCatalog = catalog.asInstanceOf[SparkCatalog]
-    val icebergCatalog =
-      sparkCatalog.icebergCatalog().asInstanceOf[org.apache.iceberg.catalog.Catalog]
-    val icebergViewCatalog =
-      sparkCatalog.icebergCatalog().asInstanceOf[org.apache.iceberg.catalog.ViewCatalog]
     val seen = scala.collection.mutable.LinkedHashSet.empty[String]
     val states = scala.collection.mutable.ListBuffer.empty[org.apache.iceberg.view.SourceState]
 
+    // Sources may live in a catalog other than the one that holds the materialized view, so the
+    // catalog that resolved each relation is used to load metadata and is recorded alongside the
+    // identifier. Filtering to the materialized view's own catalog would silently drop
+    // cross-catalog sources, and a materialized view with no recorded sources never goes stale.
+    // The test is HasIcebergCatalog rather than a concrete class so that Iceberg tables reached
+    // through the session catalog, which SparkSessionCatalog serves, are tracked as well.
     plan.collectLeaves().foreach {
       case r: org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
-          if r.catalog.exists(_.name() == sparkCatalog.name()) =>
+          if r.catalog.exists(_.isInstanceOf[HasIcebergCatalog]) && r.identifier.isDefined =>
+        val sourceCatalog = r.catalog.get.asInstanceOf[HasIcebergCatalog]
         val tableIdent = r.identifier.get
-        val key = "table:" + tableIdent.toString
+        val key = "table:" + sourceCatalog.name() + "." + tableIdent.toString
         if (seen.add(key)) {
-          val icebergId =
-            TableIdentifier.of(Namespace.of(tableIdent.namespace(): _*), tableIdent.name())
+          val icebergId = sourceCatalog.icebergIdentifier(tableIdent)
           try {
             // A SparkTable resolves its snapshot when the relation is resolved and the scan
             // reads exactly that snapshot, so the state is taken from the relation rather
@@ -137,7 +150,7 @@ case class RefreshMaterializedViewExec(catalog: ViewCatalog, ident: Identifier)
                   if (pinnedSnapshotId != null) pinnedSnapshotId.longValue()
                   else RefreshState.NO_SNAPSHOT_ID)
               case _ =>
-                val table = icebergCatalog.loadTable(icebergId)
+                val table = sourceCatalog.icebergCatalog().loadTable(icebergId)
                 val snapshot = table.currentSnapshot()
                 (
                   table.uuid().toString,
@@ -147,7 +160,7 @@ case class RefreshMaterializedViewExec(catalog: ViewCatalog, ident: Identifier)
             states += new SourceTableState(
               icebergId.name(),
               icebergId.namespace().levels().toList.asJava,
-              null,
+              sourceCatalogName(sourceCatalog),
               uuid,
               snapshotId,
               ref)
@@ -167,21 +180,24 @@ case class RefreshMaterializedViewExec(catalog: ViewCatalog, ident: Identifier)
       .collect { case view: org.apache.spark.sql.catalyst.plans.logical.View => view.desc }
       .foreach { desc =>
         val viewIdent = desc.identifier
-        if (viewIdent.catalog.contains(sparkCatalog.name())) {
-          val key = "view:" + viewIdent.unquotedString
+        viewIdent.catalog.foreach { catalogName =>
+          val key = "view:" + catalogName + "." + viewIdent.unquotedString
           if (seen.add(key)) {
             val icebergId =
               TableIdentifier.of(Namespace.of(viewIdent.database.toList: _*), viewIdent.table)
             try {
-              val view = icebergViewCatalog.loadView(icebergId)
+              val sourceCatalog = session.sessionState.catalogManager
+                .catalog(catalogName)
+                .asInstanceOf[HasIcebergCatalog]
+              val view = sourceCatalog.icebergViewCatalog().loadView(icebergId)
               states += new SourceViewState(
                 icebergId.name(),
                 icebergId.namespace().levels().toList.asJava,
-                null,
+                sourceCatalogName(sourceCatalog),
                 view.uuid().toString,
                 view.currentVersion().versionId())
             } catch {
-              case _: Exception => // the view can't be loaded
+              case _: Exception => // not an Iceberg catalog, or the view can't be loaded
             }
           }
         }
