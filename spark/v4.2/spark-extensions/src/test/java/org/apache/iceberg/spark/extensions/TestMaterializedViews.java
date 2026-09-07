@@ -194,6 +194,22 @@ public class TestMaterializedViews extends ExtensionsTestBase {
   }
 
   @TestTemplate
+  public void testStaleReadBindsQueryColumnsByName() {
+    sql("INSERT INTO %s VALUES (1, 'a'), (2, 'b'), (3, 'c')", tableName);
+    sql(
+        "CREATE MATERIALIZED VIEW %s (first, second) AS SELECT * FROM %s",
+        materializedViewName, tableName);
+
+    // Reordering the source columns changes the order of the query's output. A stale materialized
+    // view is read by running that query, and its columns are bound to the query's columns by
+    // name, so "first" still reads id.
+    sql("ALTER TABLE %s ALTER COLUMN data FIRST", tableName);
+
+    assertThat(sql("SELECT first, second FROM %s ORDER BY first", materializedViewName))
+        .containsExactly(row(1, "a"), row(2, "b"), row(3, "c"));
+  }
+
+  @TestTemplate
   public void testColumnAliasesAreRespectedWhenStaleAndWhenFresh() {
     sql("INSERT INTO %s VALUES (1, 'a'), (2, 'b'), (3, 'c')", tableName);
     sql(
