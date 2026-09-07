@@ -151,6 +151,16 @@ public class TestMaterializedViews extends ExtensionsTestBase {
   }
 
   @TestTemplate
+  public void testQueryColumnNamesUseTheViewPropertyKeys() {
+    sql("CREATE MATERIALIZED VIEW %s AS SELECT id, data FROM %s", materializedViewName, tableName);
+
+    Map<String, String> props = loadIcebergView().properties();
+    assertThat(props).doesNotContainKey("queryColumnNames");
+    assertThat(props).containsKey("spark.query-column-names-json");
+    assertThat(props).containsEntry("spark.query-column-names", "id,data");
+  }
+
+  @TestTemplate
   public void testCreateOrReplaceIsRejected() {
     sql("CREATE MATERIALIZED VIEW %s AS SELECT id, data FROM %s", materializedViewName, tableName);
 

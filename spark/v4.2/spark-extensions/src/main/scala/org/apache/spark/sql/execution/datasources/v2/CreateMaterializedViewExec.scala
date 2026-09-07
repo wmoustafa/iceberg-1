@@ -29,6 +29,7 @@ import org.apache.iceberg.spark.SparkSchemaUtil
 import org.apache.iceberg.spark.source.SparkView
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.ViewAlreadyExistsException
+import org.apache.spark.sql.catalyst.analysis.ViewUtil
 import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.connector.catalog.Identifier
 import org.apache.spark.sql.connector.catalog.TableCatalog
@@ -125,13 +126,20 @@ case class CreateMaterializedViewExec(
       if (!catalog.name().equals(currentCatalogName)) currentCatalogName else null
     val currentNamespace = session.sessionState.catalogManager.currentNamespace
 
-    val engineVersion = "Spark " + org.apache.spark.SPARK_VERSION
-    val newProperties = properties ++
-      comment.map(TableCatalog.PROP_COMMENT -> _) +
-      (
-        SparkView.PROP_CREATE_ENGINE_VERSION -> engineVersion,
-        SparkView.PROP_ENGINE_VERSION -> engineVersion) +
-      ("queryColumnNames" -> queryColumnNames.mkString(","))
+    // The reserved properties that carry Spark view metadata, including the query column names,
+    // are composed the same way as for a plain view so that a materialized view and a view are
+    // described by the same property keys. Building them by hand here is how the query column
+    // names came to be written under a key that nothing reads back.
+    val sparkView = new View.Builder()
+      .withQueryText(queryText)
+      .withCurrentCatalog(currentCatalog)
+      .withCurrentNamespace(currentNamespace)
+      .withSchema(viewSchema)
+      .withQueryColumnNames(queryColumnNames.toArray)
+      .withSqlConfigs(ImmutableMap.of[String, String]())
+      .withProperties((properties ++ comment.map(TableCatalog.PROP_COMMENT -> _)).asJava)
+      .build()
+    val newProperties = ViewUtil.createProperties(sparkView).asScala.toMap
 
     try {
       // CREATE VIEW [IF NOT EXISTS]
