@@ -125,10 +125,6 @@ case class CreateMaterializedViewExec(
 
     if (replace) {
       // CREATE OR REPLACE VIEW
-      if (catalog.viewExists(ident)) {
-        catalog.dropView(ident)
-      }
-      // FIXME: replaceView API doesn't exist in Spark 3.5
       val viewCatalog = catalog
         .asInstanceOf[SparkCatalog]
         .icebergCatalog()
@@ -142,7 +138,7 @@ case class CreateMaterializedViewExec(
         .withLocation(properties.get("location").orNull)
         .withProperties(newProperties.asJava)
         .withStorageTableIdentifier(TableIdentifier.parse(storageTableIdentifier))
-        .create()
+        .createOrReplace()
       Some(SparkView.toView(catalog.name(), icebergView))
 
     } else {
