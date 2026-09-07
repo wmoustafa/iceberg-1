@@ -814,6 +814,8 @@ public class SparkCatalog extends BaseCatalog {
     Map<String, String> props = ViewUtil.createProperties(view);
     TableIdentifier viewIdentifier = buildIdentifier(ident);
 
+    checkNotMaterializedView(viewIdentifier, viewCommit);
+
     try {
       ViewBuilder builder =
           asViewCatalog
@@ -864,6 +866,28 @@ public class SparkCatalog extends BaseCatalog {
       throw new ViewAlreadyExistsException(ident);
     } catch (org.apache.iceberg.exceptions.NoSuchViewException e) {
       throw new NoSuchViewException(ident);
+    }
+  }
+
+  private void checkNotMaterializedView(TableIdentifier viewIdentifier, ViewCommit viewCommit) {
+    if (viewCommit == ViewCommit.CREATE) {
+      return;
+    }
+
+    org.apache.iceberg.view.View existingView;
+    try {
+      existingView = asViewCatalog.loadView(viewIdentifier);
+    } catch (org.apache.iceberg.exceptions.NoSuchViewException e) {
+      // there is nothing to replace, so the commit is a plain create
+      return;
+    }
+
+    if (existingView.currentVersion().storageTable() != null) {
+      throw new UnsupportedOperationException(
+          String.format(
+              "Cannot replace materialized view %s with a view: "
+                  + "drop the materialized view and create it again",
+              viewIdentifier));
     }
   }
 

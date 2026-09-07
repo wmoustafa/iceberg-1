@@ -134,6 +134,23 @@ public class TestMaterializedViews extends ExtensionsTestBase {
   }
 
   @TestTemplate
+  public void testCreateOrReplaceViewOverMaterializedViewIsRejected() {
+    sql("CREATE MATERIALIZED VIEW %s AS SELECT id, data FROM %s", materializedViewName, tableName);
+
+    assertThatThrownBy(
+            () ->
+                sql(
+                    "CREATE OR REPLACE VIEW %s AS SELECT id FROM %s",
+                    materializedViewName, tableName))
+        .isInstanceOf(UnsupportedOperationException.class)
+        .hasMessageContaining("Cannot replace materialized view")
+        .hasMessageContaining("drop the materialized view and create it again");
+
+    // The materialized view is untouched: it still references its storage table.
+    assertThat(loadIcebergView().currentVersion().storageTable()).isNotNull();
+  }
+
+  @TestTemplate
   public void testCreateOrReplaceIsRejected() {
     sql("CREATE MATERIALIZED VIEW %s AS SELECT id, data FROM %s", materializedViewName, tableName);
 
