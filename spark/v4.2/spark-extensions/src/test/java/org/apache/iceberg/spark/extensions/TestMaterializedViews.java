@@ -161,6 +161,23 @@ public class TestMaterializedViews extends ExtensionsTestBase {
   }
 
   @TestTemplate
+  public void testRefreshFailsWhenQueryNoLongerProducesBoundColumns() {
+    sql("INSERT INTO %s VALUES (1, 'a'), (2, 'b'), (3, 'c')", tableName);
+    sql(
+        "CREATE MATERIALIZED VIEW %s (first, second) AS SELECT * FROM %s",
+        materializedViewName, tableName);
+
+    // Renaming a source column leaves the view bound to a column the query no longer produces.
+    // Reading a plain view in this state reports an incompatible schema change, so the refresh
+    // reports the columns it cannot bind rather than writing the query output positionally.
+    sql("ALTER TABLE %s RENAME COLUMN id TO ident", tableName);
+
+    assertThatThrownBy(() -> sql("REFRESH MATERIALIZED VIEW %s", materializedViewName))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("query no longer produces column(s) [id]");
+  }
+
+  @TestTemplate
   public void testRefreshBindsQueryColumnsByName() {
     sql("INSERT INTO %s VALUES (1, 'a'), (2, 'b'), (3, 'c')", tableName);
     sql(

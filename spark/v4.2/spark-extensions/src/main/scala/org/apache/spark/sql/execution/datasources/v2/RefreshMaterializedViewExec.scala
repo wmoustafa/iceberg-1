@@ -79,6 +79,15 @@ case class RefreshMaterializedViewExec(catalog: ViewCatalog, ident: Identifier)
     val rawQueryResult = session.sql(sparkSql)
     val queryResult =
       if (queryColumnNames.length == viewColumnNames.length) {
+        val missingColumns =
+          queryColumnNames.filterNot(rawQueryResult.schema.fieldNames.toSet.contains)
+        Preconditions.checkState(
+          missingColumns.isEmpty,
+          "Cannot refresh %s: query no longer produces column(s) [%s] that the view is bound to. "
+            + "Recreate the view to bind it to the current query.",
+          ident,
+          missingColumns.mkString(", "))
+
         rawQueryResult.select(queryColumnNames.zip(viewColumnNames).map {
           case (queryColumn, viewColumn) => functions.col(queryColumn).as(viewColumn)
         }: _*)
