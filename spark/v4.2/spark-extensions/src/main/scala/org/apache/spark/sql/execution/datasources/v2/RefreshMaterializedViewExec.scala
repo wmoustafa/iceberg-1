@@ -134,13 +134,11 @@ case class RefreshMaterializedViewExec(catalog: ViewCatalog, ident: Identifier)
         if (seen.add(key)) {
           val icebergId = sourceCatalog.icebergIdentifier(tableIdent)
           try {
-            // A SparkTable resolves its snapshot when the relation is resolved and the scan
-            // reads exactly that snapshot, so the state is taken from the relation rather
-            // than from a second load of the table. Loading the table again would observe
-            // whatever snapshot is current now, which may already be newer than the one this
-            // refresh reads, and the recorded state would then describe data that was never
-            // written. The ref is recorded alongside the snapshot so that freshness is later
-            // checked against the ref that was read rather than against the main branch.
+            // A SparkTable carries the snapshot that was resolved when the relation was
+            // analyzed, and the scan is pinned to that snapshot, so the identity, snapshot,
+            // and branch are read from the relation. The fallback covers relations that are
+            // not SparkTable: it loads the table and takes its current snapshot, and records
+            // no branch. Either path yields NO_SNAPSHOT_ID when there is no snapshot.
             val (uuid, ref, snapshotId) = r.table match {
               case sparkTable: SparkTable =>
                 val pinnedSnapshotId = sparkTable.snapshotId()
