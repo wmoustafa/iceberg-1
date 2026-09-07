@@ -24,6 +24,7 @@ import org.apache.iceberg.relocated.com.google.common.base.Preconditions
 import org.apache.iceberg.spark.SparkCatalog
 import org.apache.iceberg.spark.source.HasIcebergCatalog
 import org.apache.iceberg.spark.source.SparkTable
+import org.apache.iceberg.spark.source.SparkView
 import org.apache.iceberg.view.RefreshState
 import org.apache.iceberg.view.RefreshStateParser
 import org.apache.iceberg.view.SourceTableState
@@ -66,12 +67,26 @@ case class RefreshMaterializedViewExec(catalog: ViewCatalog, ident: Identifier)
 
     val refreshStartTimestampMs = System.currentTimeMillis()
 
-    // Execute the view's query to get the current result set. The view's columns may be named by
-    // column aliases that differ from the query's own output names, and the storage table is
-    // created with the view's column names, so the result is renamed to those names before it is
-    // read for source state or written.
+    // Execute the view's query to get the current result set. The view's columns are bound to the
+    // query's output columns by name rather than by position, which is how the view itself is read:
+    // the column names the query produced are recorded when the view is created, and the view's own
+    // column names are then matched to them. Binding by position instead would silently follow the
+    // source table if its columns were later reordered, and the refresh would write each column's
+    // values into whichever storage table column happened to share its position.
     val viewColumnNames = view.schema().columns().asScala.map(_.name()).toSeq
-    val queryResult = session.sql(sparkSql).toDF(viewColumnNames: _*)
+    val queryColumnNames =
+      SparkView.toView(sparkCatalog.name(), view).queryColumnNames().toSeq
+    val rawQueryResult = session.sql(sparkSql)
+    val queryResult =
+      if (queryColumnNames.length == viewColumnNames.length) {
+        rawQueryResult.select(queryColumnNames.zip(viewColumnNames).map {
+          case (queryColumn, viewColumn) => functions.col(queryColumn).as(viewColumn)
+        }: _*)
+      } else {
+        // The query's column names are not recorded, which happens when the view's schema is not
+        // bound to them, so the view's columns follow the query's output positionally.
+        rawQueryResult.toDF(viewColumnNames: _*)
+      }
 
     // Discover source tables and views from the query's logical plan and capture their
     // current state

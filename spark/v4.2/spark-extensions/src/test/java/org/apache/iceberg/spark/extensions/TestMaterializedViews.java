@@ -161,6 +161,22 @@ public class TestMaterializedViews extends ExtensionsTestBase {
   }
 
   @TestTemplate
+  public void testRefreshBindsQueryColumnsByName() {
+    sql("INSERT INTO %s VALUES (1, 'a'), (2, 'b'), (3, 'c')", tableName);
+    sql(
+        "CREATE MATERIALIZED VIEW %s (first, second) AS SELECT * FROM %s",
+        materializedViewName, tableName);
+
+    // Reordering the source columns changes the order of the query's output, but the view's
+    // columns are bound to the query's columns by name, so "first" still reads id.
+    sql("ALTER TABLE %s ALTER COLUMN data FIRST", tableName);
+    sql("REFRESH MATERIALIZED VIEW %s", materializedViewName);
+
+    assertThat(sql("SELECT first FROM %s", materializedViewName))
+        .containsExactlyInAnyOrder(row(1), row(2), row(3));
+  }
+
+  @TestTemplate
   public void testColumnAliasesNameTheViewColumns() {
     sql("INSERT INTO %s VALUES (1, 'a'), (2, 'b'), (3, 'c')", tableName);
     sql(
