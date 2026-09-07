@@ -119,12 +119,12 @@ case class RefreshMaterializedViewExec(catalog: ViewCatalog, ident: Identifier)
     val seen = scala.collection.mutable.LinkedHashSet.empty[String]
     val states = scala.collection.mutable.ListBuffer.empty[org.apache.iceberg.view.SourceState]
 
-    // Sources may live in a catalog other than the one that holds the materialized view, so the
-    // catalog that resolved each relation is used to load metadata and is recorded alongside the
-    // identifier. Filtering to the materialized view's own catalog would silently drop
-    // cross-catalog sources, and a materialized view with no recorded sources never goes stale.
-    // The test is HasIcebergCatalog rather than a concrete class so that Iceberg tables reached
-    // through the session catalog, which SparkSessionCatalog serves, are tracked as well.
+    // Every leaf relation backed by an Iceberg catalog is recorded, including relations from
+    // catalogs other than the one holding the materialized view. The catalog that resolved a
+    // relation is the one used to load its metadata, and its name is recorded alongside the
+    // identifier. Matching on HasIcebergCatalog rather than a concrete catalog class also covers
+    // Iceberg tables reached through the session catalog. Relations are deduplicated by catalog
+    // name and identifier so that a table referenced more than once yields a single state.
     plan.collectLeaves().foreach {
       case r: org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
           if r.catalog.exists(_.isInstanceOf[HasIcebergCatalog]) && r.identifier.isDefined =>
