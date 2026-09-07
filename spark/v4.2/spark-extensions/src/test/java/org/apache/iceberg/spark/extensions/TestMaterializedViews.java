@@ -155,6 +155,20 @@ public class TestMaterializedViews extends ExtensionsTestBase {
   }
 
   @TestTemplate
+  public void testCreateOrReplaceReusesStorageTableWithSameSchema() {
+    sql("CREATE MATERIALIZED VIEW %s AS SELECT id, data FROM %s", materializedViewName, tableName);
+
+    UUID originalUuid = loadStorageTable().uuid();
+
+    sql(
+        "CREATE OR REPLACE MATERIALIZED VIEW %s AS SELECT id, data FROM %s WHERE id > 1",
+        materializedViewName, tableName);
+
+    // The new query has the same schema, so the storage table is kept rather than recreated.
+    assertThat(loadStorageTable().uuid()).isEqualTo(originalUuid);
+  }
+
+  @TestTemplate
   public void testNeverRefreshedMvIsNotFresh() {
     sql("CREATE MATERIALIZED VIEW %s AS SELECT id, data FROM %s", materializedViewName, tableName);
 
@@ -661,13 +675,17 @@ public class TestMaterializedViews extends ExtensionsTestBase {
     return (SparkCatalog) spark.sessionState().catalogManager().catalog(catalogName);
   }
 
+  private org.apache.iceberg.Table loadStorageTable() {
+    View view = loadIcebergView();
+    return sparkCatalog().icebergCatalog().loadTable(view.currentVersion().storageTable());
+  }
+
   private View loadIcebergView() {
     return loadIcebergView(materializedViewName);
   }
 
   private View loadIcebergView(String viewName) {
-    org.apache.iceberg.catalog.ViewCatalog icebergViewCatalog =
-        (org.apache.iceberg.catalog.ViewCatalog) sparkCatalog().icebergCatalog();
+    org.apache.iceberg.catalog.ViewCatalog icebergViewCatalog = sparkCatalog().icebergViewCatalog();
     return icebergViewCatalog.loadView(TableIdentifier.of(NAMESPACE, viewName));
   }
 

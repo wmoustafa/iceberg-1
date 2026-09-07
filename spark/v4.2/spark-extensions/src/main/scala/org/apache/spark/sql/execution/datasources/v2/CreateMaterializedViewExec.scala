@@ -76,19 +76,29 @@ case class CreateMaterializedViewExec(
     // Per spec: "The storage table must exist and be accessible before the
     // materialized view metadata is committed."
     // A newly created MV has a storage table with no snapshots until a refresh is performed.
-    // Replacing a materialized view redefines its query, so any rows already materialized no
-    // longer answer it and the storage table is recreated with the schema of the new query.
+    // Replacing a materialized view reuses the existing storage table when the new query
+    // produces the same schema, which keeps the table's identity, partitioning, and history.
+    // The rows it holds answer the previous query, but they are never served: freshness
+    // compares the recorded view version id against the current one, so the materialized view
+    // is stale until the next refresh overwrites them. A schema change cannot be absorbed by
+    // that overwrite, so the table is recreated instead.
     val sparkCatalog = catalog.asInstanceOf[SparkCatalog]
-    if (replace && sparkCatalog.tableExists(sparkStorageTableIdentifier)) {
+    val reusableStorageTable =
+      replace && sparkCatalog.tableExists(sparkStorageTableIdentifier) &&
+        sparkCatalog.loadTable(sparkStorageTableIdentifier).schema() == viewSchema
+
+    if (replace && !reusableStorageTable && sparkCatalog.tableExists(sparkStorageTableIdentifier)) {
       sparkCatalog.dropTable(sparkStorageTableIdentifier)
     }
 
-    sparkCatalog
-      .createTable(
-        sparkStorageTableIdentifier,
-        viewSchema,
-        new Array[Transform](0),
-        ImmutableMap.of[String, String]())
+    if (!reusableStorageTable) {
+      sparkCatalog
+        .createTable(
+          sparkStorageTableIdentifier,
+          viewSchema,
+          new Array[Transform](0),
+          ImmutableMap.of[String, String]())
+    }
 
     // Step 2: Create the MV view metadata with a storage-table reference
     try {
@@ -98,12 +108,16 @@ case class CreateMaterializedViewExec(
       }
     } catch {
       case e: Exception =>
-        // If view creation fails, clean up the storage table
-        try {
-          sparkCatalog.dropTable(sparkStorageTableIdentifier)
-        } catch {
-          case _: Exception => // best effort cleanup
+        // Clean up only a storage table that this statement created. A reused one predates it
+        // and still belongs to the materialized view that is being replaced.
+        if (!reusableStorageTable) {
+          try {
+            sparkCatalog.dropTable(sparkStorageTableIdentifier)
+          } catch {
+            case _: Exception => // best effort cleanup
+          }
         }
+
         throw e
     }
 
