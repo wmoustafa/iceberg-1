@@ -194,6 +194,46 @@ public class TestMaterializedViews extends ExtensionsTestBase {
   }
 
   @TestTemplate
+  public void testColumnAliasesAreRespectedWhenStaleAndWhenFresh() {
+    sql("INSERT INTO %s VALUES (1, 'a'), (2, 'b'), (3, 'c')", tableName);
+    sql(
+        "CREATE MATERIALIZED VIEW %s (first, second) AS SELECT id, data FROM %s",
+        materializedViewName, tableName);
+    String storageTableName = materializedViewName + "__storage";
+
+    // A stale materialized view is read through its definition, so the query runs and its columns
+    // are named by the aliases.
+    assertThat(spark.table(materializedViewName).schema().fieldNames())
+        .containsExactly("first", "second");
+    assertThat(sql("SELECT first, second FROM %s ORDER BY first", materializedViewName))
+        .containsExactly(row(1, "a"), row(2, "b"), row(3, "c"));
+    assertThat(analyzedPlan("SELECT first FROM " + materializedViewName))
+        .contains("default." + tableName)
+        .doesNotContain(storageTableName);
+
+    sql("REFRESH MATERIALIZED VIEW %s", materializedViewName);
+
+    // A fresh materialized view is read from its storage table instead of by running the query,
+    // so its plan is a relation scan that does not reference the source table. The columns keep
+    // the same names and values, so which of the two answers the query is not observable.
+    assertThat(spark.table(materializedViewName).schema().fieldNames())
+        .containsExactly("first", "second");
+    assertThat(sql("SELECT first, second FROM %s ORDER BY first", materializedViewName))
+        .containsExactly(row(1, "a"), row(2, "b"), row(3, "c"));
+    assertThat(analyzedPlan("SELECT first FROM " + materializedViewName))
+        .contains("RelationV2")
+        .doesNotContain("default." + tableName);
+
+    // The storage table names its columns the same way when it is read on its own.
+    assertThat(sql("SELECT first, second FROM %s ORDER BY first", storageTableName))
+        .containsExactly(row(1, "a"), row(2, "b"), row(3, "c"));
+  }
+
+  private String analyzedPlan(String query) {
+    return spark.sql(query).queryExecution().analyzed().treeString();
+  }
+
+  @TestTemplate
   public void testColumnAliasesNameTheViewColumns() {
     sql("INSERT INTO %s VALUES (1, 'a'), (2, 'b'), (3, 'c')", tableName);
     sql(
@@ -220,7 +260,8 @@ public class TestMaterializedViews extends ExtensionsTestBase {
     // Refreshing writes the query, whose columns are named id and data, into a storage table
     // whose columns are named by the aliases.
     sql("REFRESH MATERIALIZED VIEW %s", materializedViewName);
-    assertThat(sql("SELECT first, second FROM %s ORDER BY first", materializedViewName)).hasSize(3);
+    assertThat(sql("SELECT first, second FROM %s ORDER BY first", materializedViewName))
+        .containsExactly(row(1, "a"), row(2, "b"), row(3, "c"));
   }
 
   @TestTemplate
