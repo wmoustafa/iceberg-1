@@ -119,55 +119,45 @@ case class RefreshMaterializedViewExec(catalog: ViewCatalog, ident: Identifier)
     val seen = scala.collection.mutable.LinkedHashSet.empty[String]
     val states = scala.collection.mutable.ListBuffer.empty[org.apache.iceberg.view.SourceState]
 
-    // Every leaf relation backed by an Iceberg catalog is recorded, including relations from
-    // catalogs other than the one holding the materialized view. The catalog that resolved a
-    // relation is the one used to load its metadata, and its name is recorded alongside the
-    // identifier. Matching on HasIcebergCatalog rather than a concrete catalog class also covers
-    // Iceberg tables reached through the session catalog. Relations are deduplicated by catalog
-    // name and identifier so that a table referenced more than once yields a single state.
+    // Every leaf relation backed by an Iceberg catalog is a candidate, including relations from
+    // catalogs other than the one holding the materialized view. Matching on HasIcebergCatalog
+    // rather than a concrete catalog class also covers Iceberg tables reached through the session
+    // catalog. Relations are deduplicated by catalog name and identifier so that a table
+    // referenced more than once yields a single state.
+    //
+    // Only a SparkTable is recorded. Such a relation carries the snapshot that was resolved when
+    // it was analyzed, and its scan is pinned to that snapshot, so the identity, snapshot, and
+    // branch are read from the relation itself rather than from a second load of the table. The
+    // other relations an Iceberg catalog can produce are left out on purpose, following the
+    // strategy of recording only the Iceberg dependencies a producer can track: a V1Table reached
+    // through the session catalog is not an Iceberg table, and a SparkChangelogTable reads a range
+    // of snapshots rather than a single one, so neither has a snapshot id to record. Leaving a
+    // dependency untracked means its changes do not make this materialized view stale.
     plan.collectLeaves().foreach {
       case r: org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
           if r.catalog.exists(_.isInstanceOf[HasIcebergCatalog]) && r.identifier.isDefined =>
-        val sourceCatalog = r.catalog.get.asInstanceOf[HasIcebergCatalog]
-        val tableIdent = r.identifier.get
-        val key = "table:" + sourceCatalog.name() + "." + tableIdent.toString
-        if (seen.add(key)) {
-          val icebergId = sourceCatalog.icebergIdentifier(tableIdent)
-          try {
-            // A SparkTable carries the snapshot that was resolved when the relation was
-            // analyzed, and the scan is pinned to that snapshot, so the identity, snapshot,
-            // and branch are read from the relation. The fallback covers relations that are
-            // not SparkTable: it loads the table and takes its current snapshot, and records
-            // no branch. Either path yields NO_SNAPSHOT_ID when there is no snapshot.
-            val (uuid, ref, snapshotId) = r.table match {
-              case sparkTable: SparkTable =>
-                val pinnedSnapshotId = sparkTable.snapshotId()
-                (
-                  sparkTable.table().uuid().toString,
-                  sparkTable.branch(),
-                  if (pinnedSnapshotId != null) {
-                    pinnedSnapshotId.longValue()
-                  } else {
-                    RefreshState.NO_SNAPSHOT_ID
-                  })
-              case _ =>
-                val table = sourceCatalog.icebergCatalog().loadTable(icebergId)
-                val snapshot = table.currentSnapshot()
-                (
-                  table.uuid().toString,
-                  null,
-                  if (snapshot != null) snapshot.snapshotId() else RefreshState.NO_SNAPSHOT_ID)
+        r.table match {
+          case sparkTable: SparkTable =>
+            val sourceCatalog = r.catalog.get.asInstanceOf[HasIcebergCatalog]
+            val tableIdent = r.identifier.get
+            val key = "table:" + sourceCatalog.name() + "." + tableIdent.toString
+            if (seen.add(key)) {
+              val icebergId = sourceCatalog.icebergIdentifier(tableIdent)
+              val pinnedSnapshotId = sparkTable.snapshotId()
+              states += new SourceTableState(
+                icebergId.name(),
+                icebergId.namespace().levels().toList.asJava,
+                sourceCatalogName(sourceCatalog),
+                sparkTable.table().uuid().toString,
+                if (pinnedSnapshotId != null) {
+                  pinnedSnapshotId.longValue()
+                } else {
+                  RefreshState.NO_SNAPSHOT_ID
+                },
+                sparkTable.branch())
             }
-            states += new SourceTableState(
-              icebergId.name(),
-              icebergId.namespace().levels().toList.asJava,
-              sourceCatalogName(sourceCatalog),
-              uuid,
-              snapshotId,
-              ref)
-          } catch {
-            case _: Exception => // skip tables we can't load
-          }
+
+          case _ => // not an Iceberg table with a single snapshot, so not tracked
         }
       case _ => // skip non-iceberg leaves
     }
