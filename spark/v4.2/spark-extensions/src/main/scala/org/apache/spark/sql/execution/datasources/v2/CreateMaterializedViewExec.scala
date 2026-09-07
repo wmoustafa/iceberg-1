@@ -56,6 +56,22 @@ case class CreateMaterializedViewExec(
 
   override def output: Seq[Attribute] = Nil
 
+  /**
+   * The columns of the materialized view, which are the columns of the query renamed by the column
+   * aliases the statement declared. The query column names are recorded separately, so the aliases
+   * name the view while the query keeps its own output names.
+   */
+  private lazy val outputSchema: StructType = {
+    if (columnAliases.isEmpty) {
+      viewSchema
+    } else {
+      StructType(viewSchema.fields.zipWithIndex.map { case (field, i) =>
+        val renamed = field.copy(name = columnAliases(i))
+        columnComments(i).map(renamed.withComment).getOrElse(renamed)
+      })
+    }
+  }
+
   override protected def run(): Seq[InternalRow] = {
     // Replacing a materialized view has to decide what becomes of the storage table that the
     // previous definition materialized, and the view spec leaves that open: the storage table
@@ -91,7 +107,7 @@ case class CreateMaterializedViewExec(
     sparkCatalog
       .createTable(
         sparkStorageTableIdentifier,
-        viewSchema,
+        outputSchema,
         new Array[Transform](0),
         ImmutableMap.of[String, String]())
 
@@ -120,7 +136,7 @@ case class CreateMaterializedViewExec(
   }
 
   private def createView(storageTableIdentifier: String): Option[View] = {
-    val icebergSchema = SparkSchemaUtil.convert(viewSchema)
+    val icebergSchema = SparkSchemaUtil.convert(outputSchema)
     val currentCatalogName = session.sessionState.catalogManager.currentCatalog.name
     val currentCatalog =
       if (!catalog.name().equals(currentCatalogName)) currentCatalogName else null
@@ -134,7 +150,7 @@ case class CreateMaterializedViewExec(
       .withQueryText(queryText)
       .withCurrentCatalog(currentCatalog)
       .withCurrentNamespace(currentNamespace)
-      .withSchema(viewSchema)
+      .withSchema(outputSchema)
       .withQueryColumnNames(queryColumnNames.toArray)
       .withSqlConfigs(ImmutableMap.of[String, String]())
       .withProperties((properties ++ comment.map(TableCatalog.PROP_COMMENT -> _)).asJava)

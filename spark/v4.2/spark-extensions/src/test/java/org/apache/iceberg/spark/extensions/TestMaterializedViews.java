@@ -161,6 +161,36 @@ public class TestMaterializedViews extends ExtensionsTestBase {
   }
 
   @TestTemplate
+  public void testColumnAliasesNameTheViewColumns() {
+    sql("INSERT INTO %s VALUES (1, 'a'), (2, 'b'), (3, 'c')", tableName);
+    sql(
+        "CREATE MATERIALIZED VIEW %s (first, second COMMENT 'second column')"
+            + " AS SELECT id, data FROM %s",
+        materializedViewName, tableName);
+
+    View view = loadIcebergView();
+    assertThat(view.schema().columns())
+        .map(org.apache.iceberg.types.Types.NestedField::name)
+        .containsExactly("first", "second");
+    assertThat(view.schema().findField("second").doc()).isEqualTo("second column");
+
+    // The aliases name the view; the query keeps its own output column names.
+    assertThat(view.properties()).containsEntry("spark.query-column-names", "id,data");
+
+    // The storage table materializes the view's columns, so it carries the aliases too.
+    org.apache.iceberg.Table storageTable =
+        sparkCatalog().icebergCatalog().loadTable(view.currentVersion().storageTable());
+    assertThat(storageTable.schema().columns())
+        .map(org.apache.iceberg.types.Types.NestedField::name)
+        .containsExactly("first", "second");
+
+    // Refreshing writes the query, whose columns are named id and data, into a storage table
+    // whose columns are named by the aliases.
+    sql("REFRESH MATERIALIZED VIEW %s", materializedViewName);
+    assertThat(sql("SELECT first, second FROM %s ORDER BY first", materializedViewName)).hasSize(3);
+  }
+
+  @TestTemplate
   public void testCreateOrReplaceIsRejected() {
     sql("CREATE MATERIALIZED VIEW %s AS SELECT id, data FROM %s", materializedViewName, tableName);
 

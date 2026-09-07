@@ -66,8 +66,12 @@ case class RefreshMaterializedViewExec(catalog: ViewCatalog, ident: Identifier)
 
     val refreshStartTimestampMs = System.currentTimeMillis()
 
-    // Execute the view's query to get the current result set
-    val queryResult = session.sql(sparkSql)
+    // Execute the view's query to get the current result set. The view's columns may be named by
+    // column aliases that differ from the query's own output names, and the storage table is
+    // created with the view's column names, so the result is renamed to those names before it is
+    // read for source state or written.
+    val viewColumnNames = view.schema().columns().asScala.map(_.name()).toSeq
+    val queryResult = session.sql(sparkSql).toDF(viewColumnNames: _*)
 
     // Discover source tables and views from the query's logical plan and capture their
     // current state
