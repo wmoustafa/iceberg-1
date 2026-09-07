@@ -76,22 +76,22 @@ case class CreateMaterializedViewExec(
     // Per spec: "The storage table must exist and be accessible before the
     // materialized view metadata is committed."
     // A newly created MV has a storage table with no snapshots until a refresh is performed.
-    // Replacing a materialized view reuses the existing storage table when the new query
-    // produces the same schema, which keeps the table's identity, partitioning, and history.
-    // The rows it holds answer the previous query, but they are never served: freshness
-    // compares the recorded view version id against the current one, so the materialized view
-    // is stale until the next refresh overwrites them. A schema change cannot be absorbed by
-    // that overwrite, so the table is recreated instead.
+    // Replacing a materialized view keeps the existing storage table and commits a replacement
+    // of its schema, which preserves the table's identity, partition spec, properties, and
+    // metadata history while dropping the rows that answered the previous query.
     val sparkCatalog = catalog.asInstanceOf[SparkCatalog]
-    val reusableStorageTable =
-      replace && sparkCatalog.tableExists(sparkStorageTableIdentifier) &&
-        sparkCatalog.loadTable(sparkStorageTableIdentifier).schema() == viewSchema
+    val icebergCatalog = sparkCatalog.icebergCatalog()
+    val icebergStorageTableId = sparkCatalog.icebergIdentifier(sparkStorageTableIdentifier)
+    val storageTableExists = replace && icebergCatalog.tableExists(icebergStorageTableId)
 
-    if (replace && !reusableStorageTable && sparkCatalog.tableExists(sparkStorageTableIdentifier)) {
-      sparkCatalog.dropTable(sparkStorageTableIdentifier)
-    }
-
-    if (!reusableStorageTable) {
+    if (storageTableExists) {
+      val existingStorageTable = icebergCatalog.loadTable(icebergStorageTableId)
+      icebergCatalog
+        .buildTable(icebergStorageTableId, SparkSchemaUtil.convert(viewSchema))
+        .withPartitionSpec(existingStorageTable.spec())
+        .replaceTransaction()
+        .commitTransaction()
+    } else {
       sparkCatalog
         .createTable(
           sparkStorageTableIdentifier,
@@ -108,9 +108,9 @@ case class CreateMaterializedViewExec(
       }
     } catch {
       case e: Exception =>
-        // Clean up only a storage table that this statement created. A reused one predates it
-        // and still belongs to the materialized view that is being replaced.
-        if (!reusableStorageTable) {
+        // Drop only a storage table that this statement created. One that already existed
+        // belongs to the materialized view being replaced and outlives a failed commit.
+        if (!storageTableExists) {
           try {
             sparkCatalog.dropTable(sparkStorageTableIdentifier)
           } catch {

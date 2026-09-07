@@ -31,6 +31,7 @@ import java.util.UUID;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.ParameterizedTestExtension;
 import org.apache.iceberg.Parameters;
+import org.apache.iceberg.Table;
 import org.apache.iceberg.TableOperations;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.TableIdentifier;
@@ -155,7 +156,7 @@ public class TestMaterializedViews extends ExtensionsTestBase {
   }
 
   @TestTemplate
-  public void testCreateOrReplaceReusesStorageTableWithSameSchema() {
+  public void testCreateOrReplaceKeepsStorageTableWithSameSchema() {
     sql("CREATE MATERIALIZED VIEW %s AS SELECT id, data FROM %s", materializedViewName, tableName);
 
     UUID originalUuid = loadStorageTable().uuid();
@@ -164,8 +165,24 @@ public class TestMaterializedViews extends ExtensionsTestBase {
         "CREATE OR REPLACE MATERIALIZED VIEW %s AS SELECT id, data FROM %s WHERE id > 1",
         materializedViewName, tableName);
 
-    // The new query has the same schema, so the storage table is kept rather than recreated.
     assertThat(loadStorageTable().uuid()).isEqualTo(originalUuid);
+  }
+
+  @TestTemplate
+  public void testCreateOrReplaceKeepsStorageTableWithNewSchema() {
+    sql("CREATE MATERIALIZED VIEW %s AS SELECT id, data FROM %s", materializedViewName, tableName);
+
+    UUID originalUuid = loadStorageTable().uuid();
+
+    sql(
+        "CREATE OR REPLACE MATERIALIZED VIEW %s AS SELECT id FROM %s",
+        materializedViewName, tableName);
+
+    // A schema change replaces the schema of the same table rather than creating a new one.
+    Table storageTable = loadStorageTable();
+    assertThat(storageTable.uuid()).isEqualTo(originalUuid);
+    assertThat(storageTable.schema().columns()).hasSize(1);
+    assertThat(storageTable.schema().findField("data")).isNull();
   }
 
   @TestTemplate
