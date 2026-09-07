@@ -27,11 +27,9 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.util.Arrays;
 import java.util.Map;
-import java.util.UUID;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.ParameterizedTestExtension;
 import org.apache.iceberg.Parameters;
-import org.apache.iceberg.Table;
 import org.apache.iceberg.TableOperations;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.TableIdentifier;
@@ -136,53 +134,17 @@ public class TestMaterializedViews extends ExtensionsTestBase {
   }
 
   @TestTemplate
-  public void testCreateOrReplaceKeepsViewIdentity() {
+  public void testCreateOrReplaceIsRejected() {
     sql("CREATE MATERIALIZED VIEW %s AS SELECT id, data FROM %s", materializedViewName, tableName);
 
-    View original = loadIcebergView();
-    UUID originalUuid = original.uuid();
-    int originalVersionId = original.currentVersion().versionId();
-
-    sql(
-        "CREATE OR REPLACE MATERIALIZED VIEW %s AS SELECT id FROM %s",
-        materializedViewName, tableName);
-
-    // Replacing commits a new version onto the same view rather than dropping and recreating it,
-    // so the uuid is preserved and the version history moves forward.
-    View replaced = loadIcebergView();
-    assertThat(replaced.uuid()).isEqualTo(originalUuid);
-    assertThat(replaced.currentVersion().versionId()).isGreaterThan(originalVersionId);
-    assertThat(replaced.currentVersion().storageTable()).isNotNull();
-  }
-
-  @TestTemplate
-  public void testCreateOrReplaceKeepsStorageTableWithSameSchema() {
-    sql("CREATE MATERIALIZED VIEW %s AS SELECT id, data FROM %s", materializedViewName, tableName);
-
-    UUID originalUuid = loadStorageTable().uuid();
-
-    sql(
-        "CREATE OR REPLACE MATERIALIZED VIEW %s AS SELECT id, data FROM %s WHERE id > 1",
-        materializedViewName, tableName);
-
-    assertThat(loadStorageTable().uuid()).isEqualTo(originalUuid);
-  }
-
-  @TestTemplate
-  public void testCreateOrReplaceKeepsStorageTableWithNewSchema() {
-    sql("CREATE MATERIALIZED VIEW %s AS SELECT id, data FROM %s", materializedViewName, tableName);
-
-    UUID originalUuid = loadStorageTable().uuid();
-
-    sql(
-        "CREATE OR REPLACE MATERIALIZED VIEW %s AS SELECT id FROM %s",
-        materializedViewName, tableName);
-
-    // A schema change replaces the schema of the same table rather than creating a new one.
-    Table storageTable = loadStorageTable();
-    assertThat(storageTable.uuid()).isEqualTo(originalUuid);
-    assertThat(storageTable.schema().columns()).hasSize(1);
-    assertThat(storageTable.schema().findField("data")).isNull();
+    assertThatThrownBy(
+            () ->
+                sql(
+                    "CREATE OR REPLACE MATERIALIZED VIEW %s AS SELECT id FROM %s",
+                    materializedViewName, tableName))
+        .isInstanceOf(UnsupportedOperationException.class)
+        .hasMessageContaining("Cannot replace materialized view")
+        .hasMessageContaining("Drop the materialized view and create it again");
   }
 
   @TestTemplate
@@ -690,11 +652,6 @@ public class TestMaterializedViews extends ExtensionsTestBase {
 
   private SparkCatalog sparkCatalog() {
     return (SparkCatalog) spark.sessionState().catalogManager().catalog(catalogName);
-  }
-
-  private org.apache.iceberg.Table loadStorageTable() {
-    View view = loadIcebergView();
-    return sparkCatalog().icebergCatalog().loadTable(view.currentVersion().storageTable());
   }
 
   private View loadIcebergView() {

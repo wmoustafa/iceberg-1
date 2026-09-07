@@ -56,6 +56,16 @@ case class CreateMaterializedViewExec(
   override def output: Seq[Attribute] = Nil
 
   override protected def run(): Seq[InternalRow] = {
+    // Replacing a materialized view has to decide what becomes of the storage table that the
+    // previous definition materialized, and the view spec leaves that open: the storage table
+    // identifier is recorded per view version, so a new version may keep the existing table or
+    // point at a different one. Rather than settle that here, the statement is rejected. Drop
+    // the materialized view and create it again to change its definition.
+    if (replace) {
+      throw new UnsupportedOperationException(
+        s"Cannot replace materialized view: $ident. " +
+          "Drop the materialized view and create it again to change its definition")
+    }
 
     // Check if storageTableIdentifier is provided. If not, generate a default identifier.
     val sparkStorageTableIdentifier = storageTableIdentifier match {
@@ -76,29 +86,13 @@ case class CreateMaterializedViewExec(
     // Per spec: "The storage table must exist and be accessible before the
     // materialized view metadata is committed."
     // A newly created MV has a storage table with no snapshots until a refresh is performed.
-    // Replacing a materialized view keeps the existing storage table and commits a replacement
-    // of its schema, which preserves the table's identity, partition spec, properties, and
-    // metadata history while dropping the rows that answered the previous query.
     val sparkCatalog = catalog.asInstanceOf[SparkCatalog]
-    val icebergCatalog = sparkCatalog.icebergCatalog()
-    val icebergStorageTableId = sparkCatalog.icebergIdentifier(sparkStorageTableIdentifier)
-    val storageTableExists = replace && icebergCatalog.tableExists(icebergStorageTableId)
-
-    if (storageTableExists) {
-      val existingStorageTable = icebergCatalog.loadTable(icebergStorageTableId)
-      icebergCatalog
-        .buildTable(icebergStorageTableId, SparkSchemaUtil.convert(viewSchema))
-        .withPartitionSpec(existingStorageTable.spec())
-        .replaceTransaction()
-        .commitTransaction()
-    } else {
-      sparkCatalog
-        .createTable(
-          sparkStorageTableIdentifier,
-          viewSchema,
-          new Array[Transform](0),
-          ImmutableMap.of[String, String]())
-    }
+    sparkCatalog
+      .createTable(
+        sparkStorageTableIdentifier,
+        viewSchema,
+        new Array[Transform](0),
+        ImmutableMap.of[String, String]())
 
     // Step 2: Create the MV view metadata with a storage-table reference
     try {
@@ -108,14 +102,10 @@ case class CreateMaterializedViewExec(
       }
     } catch {
       case e: Exception =>
-        // Drop only a storage table that this statement created. One that already existed
-        // belongs to the materialized view being replaced and outlives a failed commit.
-        if (!storageTableExists) {
-          try {
-            sparkCatalog.dropTable(sparkStorageTableIdentifier)
-          } catch {
-            case _: Exception => // best effort cleanup
-          }
+        try {
+          sparkCatalog.dropTable(sparkStorageTableIdentifier)
+        } catch {
+          case _: Exception => // best effort cleanup
         }
 
         throw e
@@ -143,8 +133,8 @@ case class CreateMaterializedViewExec(
         SparkView.PROP_ENGINE_VERSION -> engineVersion) +
       ("queryColumnNames" -> queryColumnNames.mkString(","))
 
-    if (replace) {
-      // CREATE OR REPLACE VIEW
+    try {
+      // CREATE VIEW [IF NOT EXISTS]
       val viewCatalog = catalog
         .asInstanceOf[SparkCatalog]
         .icebergViewCatalog()
@@ -157,30 +147,11 @@ case class CreateMaterializedViewExec(
         .withLocation(properties.get("location").orNull)
         .withProperties(newProperties.asJava)
         .withStorageTableIdentifier(TableIdentifier.parse(storageTableIdentifier))
-        .createOrReplace()
+        .create()
       Some(SparkView.toView(catalog.name(), icebergView))
-
-    } else {
-      try {
-        // CREATE VIEW [IF NOT EXISTS]
-        val viewCatalog = catalog
-          .asInstanceOf[SparkCatalog]
-          .icebergViewCatalog()
-        val icebergView = viewCatalog
-          .buildView(Spark3Util.identifierToTableIdentifier(ident))
-          .withDefaultCatalog(currentCatalog)
-          .withDefaultNamespace(Namespace.of(currentNamespace: _*))
-          .withQuery("spark", queryText)
-          .withSchema(icebergSchema)
-          .withLocation(properties.get("location").orNull)
-          .withProperties(newProperties.asJava)
-          .withStorageTableIdentifier(TableIdentifier.parse(storageTableIdentifier))
-          .create()
-        Some(SparkView.toView(catalog.name(), icebergView))
-      } catch {
-        // TODO: Make sure the existing view is also a materialized view
-        case _: ViewAlreadyExistsException if allowExisting => None
-      }
+    } catch {
+      // TODO: Make sure the existing view is also a materialized view
+      case _: ViewAlreadyExistsException if allowExisting => None
     }
   }
 
