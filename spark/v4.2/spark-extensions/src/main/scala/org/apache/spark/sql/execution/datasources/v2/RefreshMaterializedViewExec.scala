@@ -174,19 +174,31 @@ case class RefreshMaterializedViewExec(catalog: ViewCatalog, ident: Identifier)
           if (seen.add(key)) {
             val icebergId =
               TableIdentifier.of(Namespace.of(viewIdent.database.toList: _*), viewIdent.table)
-            try {
-              val sourceCatalog = session.sessionState.catalogManager
-                .catalog(catalogName)
-                .asInstanceOf[HasIcebergCatalog]
-              val view = sourceCatalog.icebergViewCatalog().loadView(icebergId)
-              states += new SourceViewState(
-                icebergId.name(),
-                icebergId.namespace().levels().toList.asJava,
-                sourceCatalogName(sourceCatalog),
-                view.uuid().toString,
-                view.currentVersion().versionId())
-            } catch {
-              case _: Exception => // not an Iceberg catalog, or the view can't be loaded
+            // The catalog is matched positively, mirroring the table pass: a catalog that is not
+            // backed by Iceberg, or one that cannot serve views, has no view state to record. A
+            // NoSuchViewException means the name resolves to something other than an Iceberg view,
+            // such as a Spark view served by the session catalog, so it is not tracked either.
+            // Any other failure to load an Iceberg view is left to propagate, because recording
+            // an incomplete set of sources would make this materialized view look fresher than it
+            // is rather than fail the refresh.
+            session.sessionState.catalogManager.catalog(catalogName) match {
+              case sourceCatalog: HasIcebergCatalog =>
+                val icebergViewCatalog = sourceCatalog.icebergViewCatalog()
+                if (icebergViewCatalog != null) {
+                  try {
+                    val view = icebergViewCatalog.loadView(icebergId)
+                    states += new SourceViewState(
+                      icebergId.name(),
+                      icebergId.namespace().levels().toList.asJava,
+                      sourceCatalogName(sourceCatalog),
+                      view.uuid().toString,
+                      view.currentVersion().versionId())
+                  } catch {
+                    case _: org.apache.iceberg.exceptions.NoSuchViewException => // not tracked
+                  }
+                }
+
+              case _ => // not an Iceberg catalog, so not tracked
             }
           }
         }
