@@ -76,8 +76,14 @@ case class CreateMaterializedViewExec(
     // Per spec: "The storage table must exist and be accessible before the
     // materialized view metadata is committed."
     // A newly created MV has a storage table with no snapshots until a refresh is performed.
-    catalog
-      .asInstanceOf[SparkCatalog]
+    // Replacing a materialized view redefines its query, so any rows already materialized no
+    // longer answer it and the storage table is recreated with the schema of the new query.
+    val sparkCatalog = catalog.asInstanceOf[SparkCatalog]
+    if (replace && sparkCatalog.tableExists(sparkStorageTableIdentifier)) {
+      sparkCatalog.dropTable(sparkStorageTableIdentifier)
+    }
+
+    sparkCatalog
       .createTable(
         sparkStorageTableIdentifier,
         viewSchema,
@@ -94,7 +100,7 @@ case class CreateMaterializedViewExec(
       case e: Exception =>
         // If view creation fails, clean up the storage table
         try {
-          catalog.asInstanceOf[SparkCatalog].dropTable(sparkStorageTableIdentifier)
+          sparkCatalog.dropTable(sparkStorageTableIdentifier)
         } catch {
           case _: Exception => // best effort cleanup
         }
@@ -127,8 +133,7 @@ case class CreateMaterializedViewExec(
       // CREATE OR REPLACE VIEW
       val viewCatalog = catalog
         .asInstanceOf[SparkCatalog]
-        .icebergCatalog()
-        .asInstanceOf[org.apache.iceberg.catalog.ViewCatalog]
+        .icebergViewCatalog()
       val icebergView = viewCatalog
         .buildView(Spark3Util.identifierToTableIdentifier(ident))
         .withDefaultCatalog(currentCatalog)
@@ -146,8 +151,7 @@ case class CreateMaterializedViewExec(
         // CREATE VIEW [IF NOT EXISTS]
         val viewCatalog = catalog
           .asInstanceOf[SparkCatalog]
-          .icebergCatalog()
-          .asInstanceOf[org.apache.iceberg.catalog.ViewCatalog]
+          .icebergViewCatalog()
         val icebergView = viewCatalog
           .buildView(Spark3Util.identifierToTableIdentifier(ident))
           .withDefaultCatalog(currentCatalog)

@@ -27,6 +27,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.util.Arrays;
 import java.util.Map;
+import java.util.UUID;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.ParameterizedTestExtension;
 import org.apache.iceberg.Parameters;
@@ -131,6 +132,26 @@ public class TestMaterializedViews extends ExtensionsTestBase {
     assertThat(view.currentVersion().storageTable().name())
         .isEqualTo(materializedViewName + "__storage");
     assertThat(view.currentVersion().storageTable().namespace()).isEqualTo(NAMESPACE);
+  }
+
+  @TestTemplate
+  public void testCreateOrReplaceKeepsViewIdentity() {
+    sql("CREATE MATERIALIZED VIEW %s AS SELECT id, data FROM %s", materializedViewName, tableName);
+
+    View original = loadIcebergView();
+    UUID originalUuid = original.uuid();
+    int originalVersionId = original.currentVersion().versionId();
+
+    sql(
+        "CREATE OR REPLACE MATERIALIZED VIEW %s AS SELECT id FROM %s",
+        materializedViewName, tableName);
+
+    // Replacing commits a new version onto the same view rather than dropping and recreating it,
+    // so the uuid is preserved and the version history moves forward.
+    View replaced = loadIcebergView();
+    assertThat(replaced.uuid()).isEqualTo(originalUuid);
+    assertThat(replaced.currentVersion().versionId()).isGreaterThan(originalVersionId);
+    assertThat(replaced.currentVersion().storageTable()).isNotNull();
   }
 
   @TestTemplate

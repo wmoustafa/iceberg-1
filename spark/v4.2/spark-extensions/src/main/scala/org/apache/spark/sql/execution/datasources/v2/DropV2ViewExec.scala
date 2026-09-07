@@ -38,8 +38,7 @@ case class DropV2ViewExec(catalog: ViewCatalog, ident: Identifier, ifExists: Boo
     // If the catalog is a SparkCatalog, check for materialized view storage table cleanup
     catalog match {
       case sparkCatalog: SparkCatalog =>
-        val icebergCatalog = sparkCatalog.icebergCatalog()
-        val icebergViewCatalog = icebergCatalog.asInstanceOf[org.apache.iceberg.catalog.ViewCatalog]
+        val icebergViewCatalog = sparkCatalog.icebergViewCatalog()
         var view: Option[View] = None
         try {
           val ns = Namespace.of(ident.namespace(): _*)

@@ -44,9 +44,7 @@ case class RefreshMaterializedViewExec(catalog: ViewCatalog, ident: Identifier)
 
   override protected def run(): Seq[InternalRow] = {
     val sparkCatalog = catalog.asInstanceOf[SparkCatalog]
-    val icebergCatalog = sparkCatalog.icebergCatalog()
-    val icebergViewCatalog =
-      icebergCatalog.asInstanceOf[org.apache.iceberg.catalog.ViewCatalog]
+    val icebergViewCatalog = sparkCatalog.icebergViewCatalog()
     val viewId = TableIdentifier.of(Namespace.of(ident.namespace(): _*), ident.name())
     val view = icebergViewCatalog.loadView(viewId)
 
