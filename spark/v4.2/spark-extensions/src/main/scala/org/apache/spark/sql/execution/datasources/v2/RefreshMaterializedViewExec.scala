@@ -74,35 +74,34 @@ case class RefreshMaterializedViewExec(catalog: ViewCatalog, ident: Identifier)
     // source table if its columns were later reordered, and the refresh would write each column's
     // values into whichever storage table column happened to share its position.
     val viewColumnNames = view.schema().columns().asScala.map(_.name()).toSeq
-    val queryColumnNames =
+    val recordedQueryColumnNames =
       SparkView.toView(sparkCatalog.name(), view).queryColumnNames().toSeq
+    Preconditions.checkState(
+      recordedQueryColumnNames.isEmpty
+        || recordedQueryColumnNames.length == viewColumnNames.length,
+      "Cannot refresh %s: view has %s column(s) but %s query column name(s) are recorded",
+      ident,
+      Int.box(viewColumnNames.length),
+      Int.box(recordedQueryColumnNames.length))
+
+    // A view created outside Spark records no query column names, and such a view is read by
+    // resolving its own column names against the query, so the refresh binds them the same way.
+    val queryColumnNames =
+      if (recordedQueryColumnNames.isEmpty) viewColumnNames else recordedQueryColumnNames
+
     val rawQueryResult = session.sql(sparkSql)
-    val queryResult =
-      if (queryColumnNames.isEmpty) {
-        // The query's column names are not recorded, which is the case for a view created outside
-        // Spark, so the view's columns follow the query's output positionally.
-        rawQueryResult.toDF(viewColumnNames: _*)
-      } else {
-        Preconditions.checkState(
-          queryColumnNames.length == viewColumnNames.length,
-          "Cannot refresh %s: view has %s column(s) but %s query column name(s) are recorded",
-          ident,
-          Int.box(viewColumnNames.length),
-          Int.box(queryColumnNames.length))
+    val missingColumns =
+      queryColumnNames.filterNot(rawQueryResult.schema.fieldNames.toSet.contains)
+    Preconditions.checkState(
+      missingColumns.isEmpty,
+      "Cannot refresh %s: query no longer produces column(s) [%s] that the view is bound to. "
+        + "Recreate the view to bind it to the current query.",
+      ident,
+      missingColumns.mkString(", "))
 
-        val missingColumns =
-          queryColumnNames.filterNot(rawQueryResult.schema.fieldNames.toSet.contains)
-        Preconditions.checkState(
-          missingColumns.isEmpty,
-          "Cannot refresh %s: query no longer produces column(s) [%s] that the view is bound to. "
-            + "Recreate the view to bind it to the current query.",
-          ident,
-          missingColumns.mkString(", "))
-
-        rawQueryResult.select(queryColumnNames.zip(viewColumnNames).map {
-          case (queryColumn, viewColumn) => functions.col(queryColumn).as(viewColumn)
-        }: _*)
-      }
+    val queryResult = rawQueryResult.select(queryColumnNames.zip(viewColumnNames).map {
+      case (queryColumn, viewColumn) => functions.col(queryColumn).as(viewColumn)
+    }: _*)
 
     // Discover source tables and views from the query's logical plan and capture their
     // current state

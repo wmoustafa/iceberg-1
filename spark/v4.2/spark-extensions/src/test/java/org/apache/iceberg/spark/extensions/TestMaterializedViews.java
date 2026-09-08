@@ -194,35 +194,45 @@ public class TestMaterializedViews extends ExtensionsTestBase {
   }
 
   @TestTemplate
-  public void testRefreshBindsPositionallyWhenQueryColumnNamesAreNotRecorded() {
-    sql("INSERT INTO %s VALUES (1, 'a'), (2, 'b'), (3, 'c')", tableName);
+  public void testRefreshBindsByViewColumnNamesWhenQueryColumnNamesAreNotRecorded() {
+    sql("DROP TABLE IF EXISTS source_table");
+    sql("CREATE TABLE source_table (x STRING, y STRING)");
+    sql("INSERT INTO source_table VALUES ('x1', 'y1'), ('x2', 'y2')");
 
     // A materialized view created outside Spark records no query column names, because that is a
-    // Spark property, so its columns follow the query's output positionally.
-    String storageTableName = "external_mv__storage";
-    sql("CREATE TABLE %s (first INT, second STRING)", storageTableName);
+    // Spark property. Such a view is read by resolving its own column names against the query.
+    org.apache.iceberg.Schema schema =
+        new org.apache.iceberg.Schema(
+            org.apache.iceberg.types.Types.NestedField.optional(
+                1, "x", org.apache.iceberg.types.Types.StringType.get()),
+            org.apache.iceberg.types.Types.NestedField.optional(
+                2, "y", org.apache.iceberg.types.Types.StringType.get()));
+    sql("CREATE TABLE external_mv__storage (x STRING, y STRING)");
     sparkCatalog()
         .icebergViewCatalog()
         .buildView(TableIdentifier.of(NAMESPACE, "external_mv"))
-        .withQuery("spark", String.format("SELECT id, data FROM %s", tableName))
+        .withQuery("spark", "SELECT * FROM source_table")
         .withDefaultNamespace(NAMESPACE)
         .withDefaultCatalog(catalogName)
-        .withSchema(
-            new org.apache.iceberg.Schema(
-                org.apache.iceberg.types.Types.NestedField.optional(
-                    1, "first", org.apache.iceberg.types.Types.IntegerType.get()),
-                org.apache.iceberg.types.Types.NestedField.optional(
-                    2, "second", org.apache.iceberg.types.Types.StringType.get())))
-        .withStorageTableIdentifier(TableIdentifier.of(NAMESPACE, storageTableName))
+        .withSchema(schema)
+        .withStorageTableIdentifier(TableIdentifier.of(NAMESPACE, "external_mv__storage"))
         .create();
 
     assertThat(loadIcebergView("external_mv").properties())
         .doesNotContainKey("spark.query-column-names");
 
     sql("REFRESH MATERIALIZED VIEW external_mv");
+    assertThat(sql("SELECT x, y FROM external_mv ORDER BY x"))
+        .containsExactly(row("x1", "y1"), row("x2", "y2"));
 
-    assertThat(sql("SELECT first, second FROM external_mv ORDER BY first"))
-        .containsExactly(row(1, "a"), row(2, "b"), row(3, "c"));
+    // Reordering the source columns must not change which column each view column reads, so the
+    // materialized view keeps agreeing with the view that it materializes.
+    sql("ALTER TABLE source_table ALTER COLUMN y FIRST");
+    sql("REFRESH MATERIALIZED VIEW external_mv");
+    assertThat(sql("SELECT x, y FROM external_mv ORDER BY x"))
+        .containsExactly(row("x1", "y1"), row("x2", "y2"));
+
+    sql("DROP TABLE IF EXISTS source_table");
   }
 
   @TestTemplate
