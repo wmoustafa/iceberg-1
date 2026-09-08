@@ -142,10 +142,10 @@ case class CreateMaterializedViewExec(
       if (!catalog.name().equals(currentCatalogName)) currentCatalogName else null
     val currentNamespace = session.sessionState.catalogManager.currentNamespace
 
-    // The reserved properties that carry Spark view metadata, including the query column names,
-    // are composed the same way as for a plain view so that a materialized view and a view are
-    // described by the same property keys. Building them by hand here is how the query column
-    // names came to be written under a key that nothing reads back.
+    // The reserved properties that carry Spark view metadata are composed the same way as for a
+    // plain view, so that a materialized view and a view are described by the same property keys.
+    // Among them are the query's column names, which pair each view column with the query column
+    // it was bound to at creation, and which a refresh reads back to rebind them by name.
     val sparkView = new View.Builder()
       .withQueryText(queryText)
       .withCurrentCatalog(currentCatalog)
