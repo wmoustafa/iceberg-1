@@ -78,7 +78,18 @@ case class RefreshMaterializedViewExec(catalog: ViewCatalog, ident: Identifier)
       SparkView.toView(sparkCatalog.name(), view).queryColumnNames().toSeq
     val rawQueryResult = session.sql(sparkSql)
     val queryResult =
-      if (queryColumnNames.length == viewColumnNames.length) {
+      if (queryColumnNames.isEmpty) {
+        // The query's column names are not recorded, which is the case for a view created outside
+        // Spark, so the view's columns follow the query's output positionally.
+        rawQueryResult.toDF(viewColumnNames: _*)
+      } else {
+        Preconditions.checkState(
+          queryColumnNames.length == viewColumnNames.length,
+          "Cannot refresh %s: view has %s column(s) but %s query column name(s) are recorded",
+          ident,
+          Int.box(viewColumnNames.length),
+          Int.box(queryColumnNames.length))
+
         val missingColumns =
           queryColumnNames.filterNot(rawQueryResult.schema.fieldNames.toSet.contains)
         Preconditions.checkState(
@@ -91,10 +102,6 @@ case class RefreshMaterializedViewExec(catalog: ViewCatalog, ident: Identifier)
         rawQueryResult.select(queryColumnNames.zip(viewColumnNames).map {
           case (queryColumn, viewColumn) => functions.col(queryColumn).as(viewColumn)
         }: _*)
-      } else {
-        // The query's column names are not recorded, which happens when the view's schema is not
-        // bound to them, so the view's columns follow the query's output positionally.
-        rawQueryResult.toDF(viewColumnNames: _*)
       }
 
     // Discover source tables and views from the query's logical plan and capture their
