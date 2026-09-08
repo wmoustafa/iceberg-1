@@ -67,10 +67,10 @@ case class RefreshMaterializedViewExec(catalog: ViewCatalog, ident: Identifier)
 
     val refreshStartTimestampMs = System.currentTimeMillis()
 
-    // Execute the view's query to get the current result set. The view's columns are bound to the
-    // query's output columns by name rather than by position, which is how the view itself is read:
-    // the column names the query produced are recorded when the view is created, and the view's own
-    // column names are then matched to them.
+    // Execute the view's query to get the current result set. Each view column then takes its
+    // values from the query column of the same name, not from the query column in the same
+    // position, which is how the view itself is read: the names the query produced are recorded
+    // when the view is created, and each view column is paired with the name recorded for it.
     val viewColumnNames = view.schema().columns().asScala.map(_.name()).toSeq
     val recordedQueryColumnNames =
       SparkView.toView(sparkCatalog.name(), view).queryColumnNames().toSeq
@@ -83,23 +83,24 @@ case class RefreshMaterializedViewExec(catalog: ViewCatalog, ident: Identifier)
       Int.box(recordedQueryColumnNames.length))
 
     // A view created outside Spark records no query column names, and such a view is read by
-    // resolving its own column names against the query, so the refresh binds them the same way.
+    // looking up its own column names in the query's output, so a refresh does the same.
     val queryColumnNames =
       if (recordedQueryColumnNames.isEmpty) viewColumnNames else recordedQueryColumnNames
 
     val rawQueryResult = session.sql(sparkSql)
-    // A column the view is bound to may be missing from the query's output. This happens when a
-    // source column is renamed or dropped: a view created as SELECT * FROM t is bound to t's
-    // column names, so renaming t.id leaves the view bound to a column the query no longer
-    // returns. A view created outside Spark, which is bound to its own column names, can be in
-    // this state from the start. Spark reports an incompatible schema change when reading such a
-    // view, so the refresh fails rather than materializing what the view cannot return.
+    // Either set of names can be missing from the query's output. Recorded names go stale when a
+    // source column is renamed or dropped: a view created as SELECT * FROM t over a table t of
+    // (id, data) records id for its first column, so renaming t.id to ident makes the query
+    // produce (ident, data), leaving no id column to read. The view's own names, used when none
+    // were recorded, may never have matched the query's output at all. Spark reports an
+    // incompatible schema change when reading a view in either state, so a refresh fails here
+    // rather than materializing what the view cannot read.
     val missingColumns =
       queryColumnNames.filterNot(rawQueryResult.schema.fieldNames.toSet.contains)
     Preconditions.checkState(
       missingColumns.isEmpty,
-      "Cannot refresh %s: query no longer produces column(s) [%s] that the view is bound to. "
-        + "Recreate the view to bind it to the current query.",
+      "Cannot refresh %s: query does not produce column(s) [%s] that the view reads. "
+        + "Recreate the view to match the current query.",
       ident,
       missingColumns.mkString(", "))
 

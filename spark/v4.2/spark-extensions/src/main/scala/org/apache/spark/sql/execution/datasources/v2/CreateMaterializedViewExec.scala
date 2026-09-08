@@ -144,8 +144,8 @@ case class CreateMaterializedViewExec(
 
     // The reserved properties that carry Spark view metadata are composed the same way as for a
     // plain view, so that a materialized view and a view are described by the same property keys.
-    // Among them are the query's column names, which pair each view column with the query column
-    // it was bound to at creation, and which a refresh reads back to rebind them by name.
+    // Among them are the query's column names, which record the query column each view column
+    // takes its values from, and which a refresh reads back to pair them up again by name.
     val sparkView = new View.Builder()
       .withQueryText(queryText)
       .withCurrentCatalog(currentCatalog)

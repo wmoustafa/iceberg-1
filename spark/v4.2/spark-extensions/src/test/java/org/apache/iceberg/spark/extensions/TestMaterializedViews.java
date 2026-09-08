@@ -169,25 +169,25 @@ public class TestMaterializedViews extends ExtensionsTestBase {
         "CREATE MATERIALIZED VIEW %s (first, second) AS SELECT * FROM %s",
         materializedViewName, tableName);
 
-    // Renaming a source column leaves the view bound to a column the query no longer produces.
+    // Renaming a source column leaves "first" paired with a name the query no longer produces.
     // Reading a plain view in this state reports an incompatible schema change, so the refresh
-    // reports the columns it cannot bind rather than writing the query output positionally.
+    // reports the columns it cannot read rather than filling them from the query's output order.
     sql("ALTER TABLE %s RENAME COLUMN id TO ident", tableName);
 
     assertThatThrownBy(() -> sql("REFRESH MATERIALIZED VIEW %s", materializedViewName))
         .isInstanceOf(IllegalStateException.class)
-        .hasMessageContaining("query no longer produces column(s) [id]");
+        .hasMessageContaining("query does not produce column(s) [id] that the view reads");
   }
 
   @TestTemplate
-  public void testRefreshBindsQueryColumnsByName() {
+  public void testRefreshReadsQueryColumnsByName() {
     sql("INSERT INTO %s VALUES (1, 'a'), (2, 'b'), (3, 'c')", tableName);
     sql(
         "CREATE MATERIALIZED VIEW %s (first, second) AS SELECT * FROM %s",
         materializedViewName, tableName);
 
-    // Reordering the source columns changes the order of the query's output, but the view's
-    // columns are bound to the query's columns by name, so "first" still reads id.
+    // Reordering the source columns changes the order of the query's output, but each view
+    // column takes its values from the query column it was paired with, so "first" still reads id.
     sql("ALTER TABLE %s ALTER COLUMN data FIRST", tableName);
     sql("REFRESH MATERIALIZED VIEW %s", materializedViewName);
 
@@ -196,7 +196,7 @@ public class TestMaterializedViews extends ExtensionsTestBase {
   }
 
   @TestTemplate
-  public void testRefreshBindsByViewColumnNamesWhenQueryColumnNamesAreNotRecorded() {
+  public void testRefreshUsesViewColumnNamesWhenQueryColumnNamesAreNotRecorded() {
     sql("DROP TABLE IF EXISTS source_table");
     sql("CREATE TABLE source_table (x STRING, y STRING)");
     sql("INSERT INTO source_table VALUES ('x1', 'y1'), ('x2', 'y2')");
@@ -279,7 +279,7 @@ public class TestMaterializedViews extends ExtensionsTestBase {
     sql("INSERT INTO src VALUES ('x1', 'y1')");
 
     // Created through Spark, so the query's column names are recorded. The aliases differ from
-    // the query's column names, so a binding that ignored the recorded names would be visible.
+    // the query's column names, so a refresh that ignored the recorded names would be visible.
     sql("CREATE VIEW v_named (a, b) AS SELECT * FROM src");
     sql("CREATE MATERIALIZED VIEW mv_named (a, b) AS SELECT * FROM src");
 
@@ -348,8 +348,8 @@ public class TestMaterializedViews extends ExtensionsTestBase {
         row("x2", "y2"),
         row("x3", "y3"));
 
-    // Refreshing after the reorder binds the query's columns again, now that the query's output
-    // order no longer matches the order the columns were bound in.
+    // Refreshing after the reorder looks the recorded names up in the query's output again, now
+    // that the query's output order no longer matches the order the columns were paired in.
     sql("REFRESH MATERIALIZED VIEW mv_named");
     sql("REFRESH MATERIALIZED VIEW mv_unnamed");
     assertMaterializedViewMatchesView(
@@ -372,15 +372,15 @@ public class TestMaterializedViews extends ExtensionsTestBase {
   }
 
   @TestTemplate
-  public void testStaleReadBindsQueryColumnsByName() {
+  public void testStaleReadReadsQueryColumnsByName() {
     sql("INSERT INTO %s VALUES (1, 'a'), (2, 'b'), (3, 'c')", tableName);
     sql(
         "CREATE MATERIALIZED VIEW %s (first, second) AS SELECT * FROM %s",
         materializedViewName, tableName);
 
     // Reordering the source columns changes the order of the query's output. A stale materialized
-    // view is read by running that query, and its columns are bound to the query's columns by
-    // name, so "first" still reads id.
+    // view is read by running that query, and each of its columns takes its values from the query
+    // column it was paired with, so "first" still reads id.
     sql("ALTER TABLE %s ALTER COLUMN data FIRST", tableName);
 
     assertThat(sql("SELECT first, second FROM %s ORDER BY first", materializedViewName))
