@@ -63,6 +63,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 
 @ExtendWith(ParameterizedTestExtension.class)
 public class TestMaterializedViews extends ExtensionsTestBase {
+  private static final String QUERY_COLUMN_NAMES = "spark.query-column-names";
+
   private static final Namespace NAMESPACE = Namespace.of("default");
   private final String tableName = "table";
   private final String materializedViewName = "materialized_view";
@@ -233,6 +235,140 @@ public class TestMaterializedViews extends ExtensionsTestBase {
         .containsExactly(row("x1", "y1"), row("x2", "y2"));
 
     sql("DROP TABLE IF EXISTS source_table");
+  }
+
+  private void assertMaterializedViewMatchesView(
+      String materializedView,
+      String view,
+      String firstColumn,
+      String secondColumn,
+      boolean expectedFresh,
+      Object[]... expectedRows) {
+    boolean fresh;
+    try {
+      fresh =
+          sparkTableCatalog()
+                  .loadTable(Identifier.of(new String[] {NAMESPACE.toString()}, materializedView))
+              instanceof SparkMaterializedView;
+    } catch (NoSuchTableException e) {
+      fresh = false;
+    }
+
+    assertThat(fresh)
+        .as("%s should be %s", materializedView, expectedFresh ? "fresh" : "stale")
+        .isEqualTo(expectedFresh);
+
+    String query = "SELECT %s, %s FROM %s ORDER BY %s";
+    assertThat(sql(query, firstColumn, secondColumn, materializedView, firstColumn))
+        .as("%s should read the columns its own schema names", materializedView)
+        .containsExactly(expectedRows);
+    assertThat(sql(query, firstColumn, secondColumn, view, firstColumn))
+        .as("%s should agree with the view that %s materializes", view, materializedView)
+        .containsExactly(expectedRows);
+  }
+
+  /**
+   * A materialized view must return what the view it materializes returns, whether it is read from
+   * its storage table or from its query, and whether or not Spark recorded the query's column
+   * names. Reordering the source table's columns must not change any of that.
+   */
+  @TestTemplate
+  public void testMaterializedViewMatchesViewAcrossFreshnessAndSourceReorder() {
+    sql("DROP TABLE IF EXISTS src");
+    sql("CREATE TABLE src (x STRING, y STRING)");
+    sql("INSERT INTO src VALUES ('x1', 'y1')");
+
+    // Created through Spark, so the query's column names are recorded. The aliases differ from
+    // the query's column names, so a binding that ignored the recorded names would be visible.
+    sql("CREATE VIEW v_named (a, b) AS SELECT * FROM src");
+    sql("CREATE MATERIALIZED VIEW mv_named (a, b) AS SELECT * FROM src");
+
+    // Created outside Spark, so no query column names are recorded.
+    org.apache.iceberg.Schema schema =
+        new org.apache.iceberg.Schema(
+            org.apache.iceberg.types.Types.NestedField.optional(
+                1, "x", org.apache.iceberg.types.Types.StringType.get()),
+            org.apache.iceberg.types.Types.NestedField.optional(
+                2, "y", org.apache.iceberg.types.Types.StringType.get()));
+    sql("CREATE TABLE mv_unnamed__storage (x STRING, y STRING)");
+    sparkCatalog()
+        .icebergViewCatalog()
+        .buildView(TableIdentifier.of(NAMESPACE, "mv_unnamed"))
+        .withQuery("spark", "SELECT * FROM src")
+        .withDefaultNamespace(NAMESPACE)
+        .withDefaultCatalog(catalogName)
+        .withSchema(schema)
+        .withStorageTableIdentifier(TableIdentifier.of(NAMESPACE, "mv_unnamed__storage"))
+        .create();
+    sparkCatalog()
+        .icebergViewCatalog()
+        .buildView(TableIdentifier.of(NAMESPACE, "v_unnamed"))
+        .withQuery("spark", "SELECT * FROM src")
+        .withDefaultNamespace(NAMESPACE)
+        .withDefaultCatalog(catalogName)
+        .withSchema(schema)
+        .create();
+
+    assertThat(loadIcebergView("mv_named").properties()).containsEntry(QUERY_COLUMN_NAMES, "x,y");
+    assertThat(loadIcebergView("mv_unnamed").properties()).doesNotContainKey(QUERY_COLUMN_NAMES);
+
+    sql("REFRESH MATERIALIZED VIEW mv_named");
+    sql("REFRESH MATERIALIZED VIEW mv_unnamed");
+    assertMaterializedViewMatchesView("mv_named", "v_named", "a", "b", true, row("x1", "y1"));
+    assertMaterializedViewMatchesView("mv_unnamed", "v_unnamed", "x", "y", true, row("x1", "y1"));
+
+    // Writing to the source makes both materialized views stale, so they are read from their
+    // queries rather than from their storage tables.
+    sql("INSERT INTO src VALUES ('x2', 'y2')");
+    assertMaterializedViewMatchesView(
+        "mv_named", "v_named", "a", "b", false, row("x1", "y1"), row("x2", "y2"));
+    assertMaterializedViewMatchesView(
+        "mv_unnamed", "v_unnamed", "x", "y", false, row("x1", "y1"), row("x2", "y2"));
+
+    // Reordering the source's columns does not write a snapshot, so both materialized views stay
+    // fresh and keep serving the rows their storage tables already hold.
+    sql("REFRESH MATERIALIZED VIEW mv_named");
+    sql("REFRESH MATERIALIZED VIEW mv_unnamed");
+    sql("ALTER TABLE src ALTER COLUMN y FIRST");
+    assertMaterializedViewMatchesView(
+        "mv_named", "v_named", "a", "b", true, row("x1", "y1"), row("x2", "y2"));
+    assertMaterializedViewMatchesView(
+        "mv_unnamed", "v_unnamed", "x", "y", true, row("x1", "y1"), row("x2", "y2"));
+
+    sql("INSERT INTO src (x, y) VALUES ('x3', 'y3')");
+    assertMaterializedViewMatchesView(
+        "mv_named", "v_named", "a", "b", false, row("x1", "y1"), row("x2", "y2"), row("x3", "y3"));
+    assertMaterializedViewMatchesView(
+        "mv_unnamed",
+        "v_unnamed",
+        "x",
+        "y",
+        false,
+        row("x1", "y1"),
+        row("x2", "y2"),
+        row("x3", "y3"));
+
+    // Refreshing after the reorder binds the query's columns again, now that the query's output
+    // order no longer matches the order the columns were bound in.
+    sql("REFRESH MATERIALIZED VIEW mv_named");
+    sql("REFRESH MATERIALIZED VIEW mv_unnamed");
+    assertMaterializedViewMatchesView(
+        "mv_named", "v_named", "a", "b", true, row("x1", "y1"), row("x2", "y2"), row("x3", "y3"));
+    assertMaterializedViewMatchesView(
+        "mv_unnamed",
+        "v_unnamed",
+        "x",
+        "y",
+        true,
+        row("x1", "y1"),
+        row("x2", "y2"),
+        row("x3", "y3"));
+
+    sql("DROP VIEW IF EXISTS mv_named");
+    sql("DROP VIEW IF EXISTS mv_unnamed");
+    sql("DROP VIEW IF EXISTS v_named");
+    sql("DROP VIEW IF EXISTS v_unnamed");
+    sql("DROP TABLE IF EXISTS src");
   }
 
   @TestTemplate
