@@ -88,6 +88,12 @@ case class RefreshMaterializedViewExec(catalog: ViewCatalog, ident: Identifier)
       if (recordedQueryColumnNames.isEmpty) viewColumnNames else recordedQueryColumnNames
 
     val rawQueryResult = session.sql(sparkSql)
+    // A column the view is bound to may be missing from the query's output. This happens when a
+    // source column is renamed or dropped: a view created as SELECT * FROM t is bound to t's
+    // column names, so renaming t.id leaves the view bound to a column the query no longer
+    // returns. A view created outside Spark, which is bound to its own column names, can be in
+    // this state from the start. Spark reports an incompatible schema change when reading such a
+    // view, so the refresh fails rather than materializing what the view cannot return.
     val missingColumns =
       queryColumnNames.filterNot(rawQueryResult.schema.fieldNames.toSet.contains)
     Preconditions.checkState(
