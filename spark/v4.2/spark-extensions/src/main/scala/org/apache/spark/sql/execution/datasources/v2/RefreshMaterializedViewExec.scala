@@ -70,9 +70,7 @@ case class RefreshMaterializedViewExec(catalog: ViewCatalog, ident: Identifier)
     // Execute the view's query to get the current result set. The view's columns are bound to the
     // query's output columns by name rather than by position, which is how the view itself is read:
     // the column names the query produced are recorded when the view is created, and the view's own
-    // column names are then matched to them. Binding by position instead would silently follow the
-    // source table if its columns were later reordered, and the refresh would write each column's
-    // values into whichever storage table column happened to share its position.
+    // column names are then matched to them.
     val viewColumnNames = view.schema().columns().asScala.map(_.name()).toSeq
     val recordedQueryColumnNames =
       SparkView.toView(sparkCatalog.name(), view).queryColumnNames().toSeq
