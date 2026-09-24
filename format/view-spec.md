@@ -64,6 +64,8 @@ Refresh metadata contains information about the "source tables", "source views",
 * **Source table** -- A table reference that is used in the computation of the query results of a materialized view.
 * **Source view** -- A view reference that is used in the computation of the query results of a materialized view.
 * **Source materialized view** -- A materialized view reference that is used in the computation of the query results of a materialized view.
+* **Fresh** -- The state of a materialized view whose storage table holds the result of the current view definition evaluated over the current state of all of its sources. Freshness is canonical and engine-independent.
+* **Reusable** -- The state of a materialized view whose storage table an engine will read for a query under its own policy. Every fresh materialized view is reusable; an engine may also treat a non-fresh materialized view as reusable.
 
 ### View Metadata
 
@@ -200,13 +202,15 @@ The `refresh-state` property is set on the [snapshot summary](https://iceberg.ap
 
 #### Freshness
 
-A materialized view is **fresh** when the storage table represents the result of the current view query. However, consumers may still decide to consume from a stale storage table based on their own policies.
+A materialized view is **fresh** when its storage table represents the result of the current view definition evaluated over the current state of all of its sources. Freshness is the canonical, engine-independent state of a materialized view.
 
-A change to the materialized view's definition produces a new `view-version-id`; any storage-table snapshot recorded at a prior `view-version-id` is invalid and should not be consumed until refreshed.
+Independently of freshness, an engine may treat a storage table as **reusable** for a query according to its own policy — for example, within a recency window, or by trusting the recorded `source-states`. Every fresh materialized view is reusable; an engine may also choose to reuse one that is not fresh. This section defines how freshness is recorded and evaluated; the reuse policy is left to the engine.
+
+A change to the materialized view's definition produces a new `view-version-id`. A storage table snapshot recorded at a prior `view-version-id` is no longer fresh and must not be treated as fresh until the materialized view is refreshed, although an engine's reuse policy may still permit reading it.
 
 #### Refresh state
 
-The refresh state record captures the state of dependencies that the producer chose to track from the materialized view's dependency graph. A dependency is recorded in `source-states` as either a `table` entry (a source table or an source materialized view's storage table) and/or a `view` entry. Source materialized views can be stored as a `view` and a `table` entry.
+The refresh state record captures the state of dependencies that the producer chose to track from the materialized view's dependency graph. A dependency is recorded in `source-states` as either a `table` entry (a source table or a source materialized view's storage table) and/or a `view` entry. Source materialized views can be stored as a `view` and a `table` entry.
 
 The refresh state has the following fields:
 
@@ -218,7 +222,7 @@ The refresh state has the following fields:
 
 ##### Producer: Recording Refresh State
 
-Producers may selectively choose a subset of their dependencies to record — for example, skipping non-Iceberg sources or recording an empty list. See [Appendix B](#appendix-b-what-counts-as-a-dependency) for strategies on how to store dependency state.
+Producers may selectively choose a subset of their dependencies to record — for example, skipping non-Iceberg sources or recording an empty list. See [Appendix B](#appendix-b-example-strategies-for-selecting-dependencies) for strategies on how to store dependency state.
 
 When writing the refresh state, producers:
 
@@ -228,13 +232,13 @@ When writing the refresh state, producers:
 
 ##### Consumer: Evaluating Refresh State
 
-Consumers may use any combination of the following to assess the state of dependencies used to produce the storage table.
+To decide whether the storage table is **reusable**, consumers may use any combination of the following to assess the state of the dependencies used to produce it.
 
-* **Recency policy.** Accept the storage table when `refresh-start-timestamp-ms` falls within a staleness window. A recency policy bounds data age but does not establish freshness.
+* **Recency policy.** Accept the storage table when `refresh-start-timestamp-ms` falls within a staleness window. A recency policy can make the storage table reusable under the engine's policy but does not establish freshness.
 * **Trust the recorded `source-states`.** Compare each entry against the current catalog state — `snapshot-id` for tables, `version-id` for views, optionally recursive verification for source materialized views recorded by their storage tables. Also confirm that the recorded `view-version-id` equals the materialized view's current `view-version-id`.
 * **Verify by parsing the view query.** Derive the dependency set from the SQL and confirm every dependency is covered by `source-states` and matches the current state. Treat any uncovered dependency as undetermined.
 
-If a consumer's assessment passes, it reads from the storage table. If not, the consumer may fail the query, evaluate the view query directly, or apply another strategy.
+If the assessment deems the storage table reusable, the consumer reads from it. Otherwise the consumer may fail the query, evaluate the view query directly, or apply another strategy.
 
 #### Source state
 
@@ -256,7 +260,7 @@ A source table record captures the state of a source table (including a source m
 | _required_  | `type`        | A string that must be set to `table` |
 | _required_  | `name`        | A string specifying the name of the source table |
 | _required_  | `namespace`   | A list of strings for namespace levels |
-| _required_  | `catalog`     | A string specifying the name of the catalog. |
+| _required_  | `catalog`     | A string specifying the name of the catalog |
 | _required_  | `uuid`        | The uuid of the source table |
 | _optional_  | `snapshot-id` | The snapshot-id of the source table that was read during the refresh operation. Omitted when the source table had no snapshots at refresh time (e.g. a newly created, empty table) |
 | _optional_  | `ref`         | Branch name of the source table being referenced in the view query |
@@ -272,7 +276,7 @@ A source view record captures the state of a source view at the time of the last
 | _required_  | `type`       | A string that must be set to `view` |
 | _required_  | `name`       | A string specifying the name of the source view |
 | _required_  | `namespace`  | A list of strings for namespace levels |
-| _required_  | `catalog`     | A string specifying the name of the catalog. |
+| _required_  | `catalog`     | A string specifying the name of the catalog |
 | _required_  | `uuid`       | The uuid of the source view |
 | _required_  | `version-id` | The version-id of the source view that was read during the refresh operation |
 
@@ -579,7 +583,7 @@ The producer leaves `source-states` empty and relies entirely on `refresh-start-
 
 ### Strategy 2: Treat nested materialized views as tables
 
-Same as Strategy 1, but the query reads from materialized views. The producer stops at each MV boundary and records the MV's storage table snapshot ID and view version ID. No expansion beyond the MV.
+Same as Strategy 1, but the query reads from materialized views. The producer stops at each MV boundary and records the MV's storage table `snapshot-id` and `view-version-id`. No expansion beyond the MV.
 
 `C` and `D` are materialized views, treated as tables.
 
@@ -619,7 +623,7 @@ The recorded shape matches Strategy 1. The difference is semantic: `C` and `D` a
 
 ### Strategy 4: Track only view versions
 
-The producer treats the storage table as reusable as long as the view definitions in the dependency chain are unchanged. Underlying table changes do not affect freshness. Only view version IDs are recorded.
+The producer treats the storage table as reusable as long as the view definitions in the dependency chain are unchanged. Underlying table changes do not affect freshness. Only `view-version-id`s are recorded.
 
 `C` and `D` are regular views.
 
